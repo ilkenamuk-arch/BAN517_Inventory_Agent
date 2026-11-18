@@ -37,6 +37,10 @@ from inventory_tools import (
     ROPResult,
     PeriodicReviewResult,
     NewsvendorResult,
+    assign_pareto_class,
+    assign_final_inventory_class,
+    classify_multicriteria_inventory,
+    ClassificationResult,
 )
 
 
@@ -977,6 +981,205 @@ class TestCSVDataAnalysis(unittest.TestCase):
         # 5. Inventory Value = Units * Unit Cost: 200*15=3000, 800*10=8000, 300*50=15000, 100*25=2500 -> sum = 28500
         self.assertIn("Inventory Value", results["dataframe"].columns)
         self.assertEqual(results["total_inventory_value"], 28500.0)
+
+
+# ===========================================================================
+# 10. Multicriteria Inventory Classification Tests (BAN 517 Methodology)
+# ===========================================================================
+class TestMulticriteriaInventoryClassification(unittest.TestCase):
+    """
+    Unit and integration tests for multicriteria inventory classification (Sales + Hits)
+    following BAN 517 Inventory Classification Methodology.
+    """
+
+    def test_assign_pareto_class_boundaries(self):
+        """Verify Pareto threshold cutoffs without gaps for decimal percentages."""
+        # Class A: 0 - 60.0%
+        self.assertEqual(assign_pareto_class(0.0), "A")
+        self.assertEqual(assign_pareto_class(30.0), "A")
+        self.assertEqual(assign_pareto_class(60.0), "A")
+        # Rank-1 item is always Class A even if individual share > 60%
+        self.assertEqual(assign_pareto_class(75.0, is_first=True), "A")
+
+        # Class B: 61 - 80.0% (60.0% < cum <= 80.0%)
+        self.assertEqual(assign_pareto_class(60.0001), "B")
+        self.assertEqual(assign_pareto_class(70.0), "B")
+        self.assertEqual(assign_pareto_class(80.0), "B")
+
+        # Class C: 81 - 90.0% (80.0% < cum <= 90.0%)
+        self.assertEqual(assign_pareto_class(80.0001), "C")
+        self.assertEqual(assign_pareto_class(85.0), "C")
+        self.assertEqual(assign_pareto_class(90.0), "C")
+
+        # Class D: 91 - 100.0% (cum > 90.0%)
+        self.assertEqual(assign_pareto_class(90.0001), "D")
+        self.assertEqual(assign_pareto_class(95.0), "D")
+        self.assertEqual(assign_pareto_class(100.0), "D")
+
+    def test_assign_final_inventory_class_unrounded_boundaries(self):
+        """Verify final inventory class thresholds on unrounded weighted scores."""
+        # Class A: 3.25 to 4.00
+        self.assertEqual(assign_final_inventory_class(4.00), "A")
+        self.assertEqual(assign_final_inventory_class(3.65), "A")
+        self.assertEqual(assign_final_inventory_class(3.35), "A")
+        self.assertEqual(assign_final_inventory_class(3.25), "A")
+
+        # Boundary right below 3.25 must be Class B
+        self.assertEqual(assign_final_inventory_class(3.2499), "B")
+        self.assertEqual(assign_final_inventory_class(3.00), "B")
+        self.assertEqual(assign_final_inventory_class(2.65), "B")
+        self.assertEqual(assign_final_inventory_class(2.50), "B")
+
+        # Boundary right below 2.50 must be Class C
+        self.assertEqual(assign_final_inventory_class(2.4999), "C")
+        self.assertEqual(assign_final_inventory_class(2.35), "C")
+        self.assertEqual(assign_final_inventory_class(2.00), "C")
+        self.assertEqual(assign_final_inventory_class(1.75), "C")
+
+        # Boundary right below 1.75 must be Class D
+        self.assertEqual(assign_final_inventory_class(1.7499), "D")
+        self.assertEqual(assign_final_inventory_class(1.65), "D")
+        self.assertEqual(assign_final_inventory_class(1.00), "D")
+        self.assertEqual(assign_final_inventory_class(0.00), "D")
+
+    def test_score_conversion_and_weight_formula_combinations(self):
+        """Verify all combinations of Sales and Hits scores under 65%/35% weighting."""
+        # Mapping: A=4, B=3, C=2, D=1
+        score_map = {"A": 4, "B": 3, "C": 2, "D": 1}
+        # Expected combined scores and classes:
+        # (Sales_Class, Hits_Class) -> score = 0.65 * S + 0.35 * H
+        expected_cases = [
+            ("A", "A", 0.65 * 4 + 0.35 * 4, "A"),  # 4.00 -> A
+            ("A", "B", 0.65 * 4 + 0.35 * 3, "A"),  # 3.65 -> A
+            ("A", "C", 0.65 * 4 + 0.35 * 2, "A"),  # 3.30 -> A
+            ("A", "D", 0.65 * 4 + 0.35 * 1, "B"),  # 2.95 -> B
+            ("B", "A", 0.65 * 3 + 0.35 * 4, "A"),  # 3.35 -> A
+            ("B", "B", 0.65 * 3 + 0.35 * 3, "B"),  # 3.00 -> B
+            ("B", "C", 0.65 * 3 + 0.35 * 2, "B"),  # 2.65 -> B
+            ("B", "D", 0.65 * 3 + 0.35 * 1, "C"),  # 2.30 -> C
+            ("C", "A", 0.65 * 2 + 0.35 * 4, "B"),  # 2.70 -> B
+            ("C", "B", 0.65 * 2 + 0.35 * 3, "C"),  # 2.35 -> C
+            ("C", "C", 0.65 * 2 + 0.35 * 2, "C"),  # 2.00 -> C
+            ("C", "D", 0.65 * 2 + 0.35 * 1, "D"),  # 1.65 -> D
+            ("D", "A", 0.65 * 1 + 0.35 * 4, "C"),  # 2.05 -> C
+            ("D", "B", 0.65 * 1 + 0.35 * 3, "D"),  # 1.70 -> D (1.70 < 1.75)
+            ("D", "C", 0.65 * 1 + 0.35 * 2, "D"),  # 1.35 -> D
+            ("D", "D", 0.65 * 1 + 0.35 * 1, "D"),  # 1.00 -> D
+        ]
+        for s_cls, h_cls, expected_score, expected_final in expected_cases:
+            s_score = score_map[s_cls]
+            h_score = score_map[h_cls]
+            calc_score = 0.65 * s_score + 0.35 * h_score
+            self.assertAlmostEqual(calc_score, expected_score, places=4)
+            final_cls = assign_final_inventory_class(calc_score)
+            self.assertEqual(
+                final_cls,
+                expected_final,
+                f"Mismatch for Sales {s_cls}({s_score}), Hits {h_cls}({h_score}): score={calc_score}, expected={expected_final}, got={final_cls}"
+            )
+
+    def test_classify_multicriteria_inventory_dataframe_end_to_end(self):
+        """Verify full classification pipeline with a representative dataset."""
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed in current test interpreter")
+
+        # 10 items designed to span different Pareto brackets
+        data = {
+            "Item Number": [f"SKU-{i:03d}" for i in range(1, 11)],
+            "Item Name": [f"Item {i}" for i in range(1, 11)],
+            "UoM": ["EA"] * 10,
+            "Sales ($)": [50000.0, 25000.0, 10000.0, 7000.0, 4000.0, 2000.0, 1000.0, 500.0, 300.0, 200.0],
+            # Total Sales = 100,000
+            # Sales %: 50%, 25%, 10%, 7%, 4%, 2%, 1%, 0.5%, 0.3%, 0.2%
+            # Cum Sales %: 50%(A), 75%(B), 85%(C), 92%(D), 96%(D), 98%(D), 99%(D), 99.5%(D), 99.8%(D), 100%(D)
+            "Hits": [100, 300, 50, 400, 20, 80, 10, 5, 25, 10],
+            # Total Hits = 1000
+        }
+        df = pd.DataFrame(data)
+        res = classify_multicriteria_inventory(df)
+
+        self.assertIsInstance(res, ClassificationResult)
+        self.assertTrue(res.verification_passed)
+        self.assertEqual(res.total_items, 10)
+        self.assertAlmostEqual(res.total_sales, 100000.0, places=2)
+        self.assertAlmostEqual(res.total_hits, 1000.0, places=2)
+
+        # 10 calculated columns check
+        expected_cols = [
+            "Sales Percentage",
+            "Cumulative Sales Percentage",
+            "Sales Class",
+            "Hits Percentage",
+            "Cumulative Hits Percentage",
+            "Hits Class",
+            "Sales Score",
+            "Hits Score",
+            "Combined Weighted Score",
+            "Final Inventory Class",
+        ]
+        for col in expected_cols:
+            self.assertIn(col, res.classified_df.columns, f"Missing required column: {col}")
+
+        # Summary table checks: all 4 classes present
+        summary = res.summary_df
+        self.assertEqual(len(summary), 4)
+        self.assertEqual(list(summary["Final Inventory Class"]), ["A", "B", "C", "D"])
+
+        # Reconciliations
+        self.assertEqual(sum(res.class_counts.values()), 10)
+        self.assertAlmostEqual(sum(res.class_sales.values()), 100000.0, places=2)
+        self.assertEqual(res.sales_weight + res.hits_weight, 1.0)
+
+    def test_classify_multicriteria_missing_columns_raises_value_error(self):
+        """Verify clear error when required project columns are missing."""
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed in current test interpreter")
+
+        # Missing 'Hits' and 'Sales ($)'
+        df_invalid = pd.DataFrame({"Item Number": ["SKU-01"], "Item Name": ["Part A"], "UoM": ["EA"]})
+        with self.assertRaises(ValueError) as ctx:
+            classify_multicriteria_inventory(df_invalid)
+        self.assertIn("Missing required column", str(ctx.exception))
+        self.assertIn("Sales ($)", str(ctx.exception))
+        self.assertIn("Hits", str(ctx.exception))
+
+    def test_classify_multicriteria_empty_dataframe_raises_value_error(self):
+        """Verify empty dataframe raises ValueError."""
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed in current test interpreter")
+
+        df_empty = pd.DataFrame(columns=["Item Number", "Item Name", "UoM", "Sales ($)", "Hits"])
+        with self.assertRaises(ValueError) as ctx:
+            classify_multicriteria_inventory(df_empty)
+        self.assertIn("empty", str(ctx.exception).lower())
+
+    def test_classify_multicriteria_duplicate_item_identifiers_handled(self):
+        """Verify duplicate Item Number values do not corrupt rows or produce cartesian products."""
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed in current test interpreter")
+
+        data = {
+            "Item Number": ["DUP-01", "DUP-01", "SKU-03"],
+            "Item Name": ["Item 1", "Item 2", "Item 3"],
+            "UoM": ["EA", "EA", "EA"],
+            "Sales ($)": [600.0, 300.0, 100.0],
+            "Hits": [10, 20, 30],
+        }
+        df = pd.DataFrame(data)
+        res = classify_multicriteria_inventory(df)
+
+        self.assertEqual(len(res.classified_df), 3)
+        self.assertEqual(res.total_items, 3)
+        self.assertAlmostEqual(res.total_sales, 1000.0, places=2)
+        self.assertEqual(sum(res.class_counts.values()), 3)
 
 
 if __name__ == "__main__":

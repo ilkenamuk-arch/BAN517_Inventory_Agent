@@ -22,6 +22,7 @@ import sys
 from typing import List, Optional
 
 from inventory_agent import InventoryDecisionAgent, ModelType, AgentDecision
+from inventory_tools import classify_multicriteria_inventory, ClassificationResult
 
 
 # ---------------------------------------------------------------------------
@@ -304,33 +305,124 @@ def run_streamlit_app():
             st.markdown(decision.explanation)
 
     # -----------------------------------------------------------------------
-    # CSV Data Processing & Analysis Section
+    # CSV Data Processing & Analysis Section (Supports Both CSV Schemas)
     # -----------------------------------------------------------------------
     if uploaded_file is not None:
-        st.divider()
-        st.header("📊 Inventory Data Analysis")
-
         try:
             df = pd.read_csv(uploaded_file)
         except Exception as e:
             st.error(f"Error reading CSV file: {e}")
             return
 
-        # Validate required columns
-        required_columns = ["Product", "Category", "Units", "Unit Cost"]
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        # Detect CSV schema
+        classification_cols = ["Item Number", "Item Name", "UoM", "Sales ($)", "Hits"]
+        analysis_cols = ["Product", "Category", "Units", "Unit Cost"]
 
-        if missing_columns:
-            st.error(
-                f"Missing required column(s): {', '.join(missing_columns)}. "
-                f"The CSV file must contain the following columns: {', '.join(required_columns)}."
+        df_cols_clean = [str(c).strip() for c in df.columns]
+        is_classification_format = all(c in df_cols_clean for c in classification_cols)
+        is_analysis_format = all(c in df_cols_clean for c in analysis_cols)
+
+        # -------------------------------------------------------------------
+        # Schema 1: Multicriteria Inventory Classification (BAN 517 Methodology)
+        # -------------------------------------------------------------------
+        if is_classification_format:
+            st.divider()
+            st.header("🏷️ Multicriteria Inventory Classification (BAN 517 Methodology)")
+            st.caption("Pareto Analysis: 65% Monetary Value (Sales) + 35% Transaction Velocity (Hits)")
+
+            # Display uploaded dataframe preview
+            st.subheader("Uploaded Project Data Preview")
+            st.dataframe(df, use_container_width=True)
+
+            # Display dataset dimensions
+            num_rows, num_cols = df.shape
+            col_names_formatted = ", ".join(f"`{c}`" for c in df.columns)
+            st.markdown(
+                f"- **Number of Rows:** {num_rows:,}  \n"
+                f"- **Number of Columns:** {num_cols}  \n"
+                f"- **Column Names:** {col_names_formatted}"
             )
-        else:
-            # 4. Display the uploaded dataframe in the main Streamlit page
+
+            try:
+                result = classify_multicriteria_inventory(df, sales_weight=0.65, hits_weight=0.35)
+            except Exception as e:
+                st.error(f"Classification calculation error: {e}")
+                return
+
+            # Executive KPI Cards
+            st.subheader("Executive Classification Overview")
+            kpi_c1, kpi_c2, kpi_c3, kpi_c4 = st.columns(4)
+            with kpi_c1:
+                st.metric("Total Items", f"{result.total_items:,}")
+            with kpi_c2:
+                st.metric("Total Sales", f"${result.total_sales:,.2f}")
+            with kpi_c3:
+                st.metric("Total Hits", f"{result.total_hits:,.0f}")
+            with kpi_c4:
+                pct_a_sales = (result.class_sales['A'] / result.total_sales * 100.0) if result.total_sales > 0 else 0.0
+                st.metric("Class A Sales Share", f"{pct_a_sales:.1f}%", help=f"${result.class_sales['A']:,.2f} across {result.class_counts['A']} items")
+
+            # 6. Classification Summary Table (Always includes A, B, C, D)
+            st.subheader("Multicriteria Inventory Classification Summary")
+            st.markdown(
+                "Final class assignment thresholds (applied to unrounded Combined Weighted Score):  \n"
+                "**Class A:** [3.25–4.00] | **Class B:** [2.50–3.24] | **Class C:** [1.75–2.49] | **Class D:** Below 1.75"
+            )
+            summary_display = result.summary_df.copy()
+            st.dataframe(
+                summary_display.style.format({
+                    "Number of Items": "{:,.0f}",
+                    "Total Sales ($)": "${:,.2f}",
+                    "% of Total Items": "{:,.1f}%",
+                    "% of Total Sales": "{:,.1f}%",
+                }),
+                use_container_width=True
+            )
+
+            # 5. Detailed Classified Dataframe with all 10 calculated columns
+            st.subheader("Detailed Classified Inventory Dataset")
+            st.caption(
+                "Includes all 10 calculated attributes: Sales Percentage, Cumulative Sales Percentage, Sales Class, "
+                "Hits Percentage, Cumulative Hits Percentage, Hits Class, Sales Score, Hits Score, "
+                "Combined Weighted Score (0.65×Sales + 0.35×Hits), and Final Inventory Class."
+            )
+            classified_display = result.classified_df.copy()
+            st.dataframe(
+                classified_display.style.format({
+                    "Sales ($)": "${:,.2f}",
+                    "Sales Percentage": "{:,.2f}%",
+                    "Cumulative Sales Percentage": "{:,.2f}%",
+                    "Hits": "{:,.0f}",
+                    "Hits Percentage": "{:,.2f}%",
+                    "Cumulative Hits Percentage": "{:,.2f}%",
+                    "Sales Score": "{:.0f}",
+                    "Hits Score": "{:.0f}",
+                    "Combined Weighted Score": "{:.4f}",
+                }),
+                use_container_width=True
+            )
+
+            # Verification Checks Expander
+            with st.expander("🔍 Verification Checks & Methodology Details", expanded=False):
+                st.markdown("#### Mathematical & Reconciliation Verification:")
+                for chk in result.verification_checks:
+                    st.markdown(f"- {chk}")
+                st.markdown("#### Methodology & Threshold Rules:")
+                for idx, asm in enumerate(result.assumptions, 1):
+                    st.markdown(f"{idx}. {asm}")
+
+        # -------------------------------------------------------------------
+        # Schema 2: Stock Units & Valuation Analysis (Existing Format)
+        # -------------------------------------------------------------------
+        elif is_analysis_format:
+            st.divider()
+            st.header("📊 Inventory Data Analysis")
+
+            # Display the uploaded dataframe
             st.subheader("Uploaded Inventory Data")
             st.dataframe(df, use_container_width=True)
 
-            # 5. Display dataset properties: rows, columns, and column names
+            # Display dataset properties
             num_rows, num_cols = df.shape
             col_names_formatted = ", ".join(f"`{c}`" for c in df.columns)
             st.markdown(
@@ -350,7 +442,7 @@ def run_streamlit_app():
             total_inventory_value = analysis_results["total_inventory_value"]
             augmented_df = analysis_results["dataframe"]
 
-            # RESULTS: Key Inventory Metrics Display
+            # Key Inventory Metrics Display
             st.subheader("Key Inventory Metrics")
             kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
             with kpi_col1:
@@ -385,7 +477,7 @@ def run_streamlit_app():
                 use_container_width=True
             )
 
-            # The dataframe including the new Inventory Value column with currency formatting
+            # Augmented dataframe with currency formatting
             st.subheader("Inventory Data with Inventory Value")
             display_df = augmented_df.copy()
             st.dataframe(
@@ -395,6 +487,19 @@ def run_streamlit_app():
                     "Inventory Value": "${:,.2f}",
                 }),
                 use_container_width=True
+            )
+
+        # -------------------------------------------------------------------
+        # Unrecognized Schema Error Handling
+        # -------------------------------------------------------------------
+        else:
+            missing_class = [c for c in classification_cols if c not in df_cols_clean]
+            missing_anal = [c for c in analysis_cols if c not in df_cols_clean]
+            st.error(
+                "⚠️ **Unrecognized CSV Schema:** The uploaded file does not match either supported inventory schema:\n\n"
+                f"1. **Multicriteria Classification Schema:** Requires `Item Number`, `Item Name`, `UoM`, `Sales ($)`, `Hits`. (Missing: {', '.join(missing_class)})\n"
+                f"2. **Inventory Stock Analysis Schema:** Requires `Product`, `Category`, `Units`, `Unit Cost`. (Missing: {', '.join(missing_anal)})\n\n"
+                "Please verify your CSV file header names."
             )
 
 
