@@ -278,9 +278,13 @@ class InventoryDecisionAgent:
                 rf"(?<!holding\s)(?<!carrying\s)price\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit|each)?",
             ], q)
 
-            inputs["working_days_per_year"] = extract_pattern([
+            extracted_days = extract_pattern([
                 rf"({num_pat})\s*(?:operating|working)?\s*days\s*per\s*year",
-            ], q) or self.default_working_days
+                rf"({num_pat})\s*(?:operating|working)?\s*days\s*(?:a|in\s+a)\s*year",
+                rf"(?:operating|working)\s*(?:for|=|:)?\s*({num_pat})\s*days",
+            ], q)
+            inputs["working_days_per_year"] = int(extracted_days) if extracted_days is not None else self.default_working_days
+            inputs["_working_days_explicit"] = (extracted_days is not None)
 
         # -------------------------------------------------------------------
         # 2. Quantity Discount Extraction
@@ -847,13 +851,30 @@ class InventoryDecisionAgent:
         lines.append("| :--- | :--- | :--- |")
         inputs_dict = getattr(result, "inputs_extracted", inputs)
         for k, v in inputs_dict.items():
+            if k.startswith("_"):
+                continue
             clean_k = k.replace("_", " ").title()
             if v is not None:
                 if isinstance(v, float):
                     v_str = f"${v:,.2f}" if any(c in k.lower() for c in ["cost", "price", "salvage", "penalty"]) else (f"{v:,.4f}".rstrip("0").rstrip(".") if "." in f"{v:,.4f}" else f"{v:,.0f}")
                 else:
                     v_str = str(v)
-                lines.append(f"| {clean_k} (`{k}`) | {v_str} | Given in problem statement |")
+
+                # Check whether working days was explicitly provided in the problem statement
+                if k == "working_days_per_year":
+                    is_working_days_explicit = inputs.get("_working_days_explicit")
+                    if is_working_days_explicit is None:
+                        num_pat = r"\d+(?:,\d{3})*(?:\.\d+)?"
+                        is_working_days_explicit = bool(re.search(
+                            rf"({num_pat})\s*(?:operating|working)?\s*days\s*(?:per|a|in\s+a)?\s*year",
+                            question,
+                            re.IGNORECASE,
+                        ))
+                    status_note = "Given in problem statement" if is_working_days_explicit else "Default assumption"
+                else:
+                    status_note = "Given in problem statement"
+
+                lines.append(f"| {clean_k} (`{k}`) | {v_str} | {status_note} |")
             else:
                 lines.append(f"| {clean_k} (`{k}`) | *Not provided* | Optional (not required when holding cost H is given directly) |")
         lines.append("")
@@ -1051,7 +1072,8 @@ class InventoryDecisionAgent:
         lines.append("### 7. Verification Checks")
         checks = getattr(result, "verification_checks", verification_checklist)
         for chk in checks:
-            lines.append(f"- {chk}")
+            safe_chk = re.sub(r'(?<!\\)\$', r'\\$', str(chk))
+            lines.append(f"- {safe_chk}")
         lines.append("")
 
         # -------------------------------------------------------------------
@@ -1060,15 +1082,16 @@ class InventoryDecisionAgent:
         lines.append("### 8. Assumptions")
         assumptions = getattr(result, "assumptions", [])
         for idx, asm in enumerate(assumptions, 1):
-            lines.append(f"{idx}. {asm}")
+            safe_asm = re.sub(r'(?<!\\)\$', r'\\$', str(asm))
+            lines.append(f"{idx}. {safe_asm}")
         lines.append("")
 
         # Managerial Insight
         lines.append("#### Managerial Insight:")
         if model == ModelType.EOQ:
             r: EOQResult = result
-            lines.append(f"- At $Q^* = {r.eoq:.2f}$, Annual Ordering Cost exactly balances Annual Holding Cost (${r.annual_order_cost:,.2f}).")
-            lines.append(f"- Rounding to an actionable batch size of **{r.rounded_eoq:,} units** increases total annual inventory cost by only **${r.cost_penalty_rounded:.2f}**, demonstrating the flat bottom (robustness) of the EOQ total cost curve.")
+            lines.append(f"- At $Q^* = {r.eoq:.2f}$, Annual Ordering Cost exactly balances Annual Holding Cost (\\${r.annual_order_cost:,.2f}).")
+            lines.append(f"- Rounding to an actionable batch size of **{r.rounded_eoq:,} units** increases total annual inventory cost by only **\\${r.cost_penalty_rounded:.2f}**, demonstrating the flat bottom (robustness) of the EOQ total cost curve.")
         elif model == ModelType.QUANTITY_DISCOUNT:
             r: QuantityDiscountResult = result
             best_t = r.tiers[r.best_tier_index]

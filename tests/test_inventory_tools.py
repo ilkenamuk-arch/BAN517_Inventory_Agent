@@ -960,6 +960,42 @@ class TestStudentVerificationOutputs(unittest.TestCase):
             bare_dollars = re.findall(r"(?<!\\)(?<!\\text\{)\$", formula_str)
             self.assertEqual(len(bare_dollars), 0, f"Unescaped dollar sign found in formula '{k}': {formula_str}")
 
+    def test_eoq_working_days_status_default_assumption_when_omitted(self):
+        """Verify working_days_per_year is labeled 'Default assumption' when omitted from question."""
+        q = "Our annual demand is 10,000 units, order cost is $50, and holding cost is $2 per unit per year. What is our EOQ?"
+        decision = self.agent.process_question(q)
+        self.assertIn("| Working Days Per Year (`working_days_per_year`) | 365 | Default assumption |", decision.explanation)
+        self.assertNotIn("| Working Days Per Year (`working_days_per_year`) | 365 | Given in problem statement |", decision.explanation)
+
+    def test_eoq_working_days_status_given_when_numeric_value_explicitly_specified(self):
+        """Verify working_days_per_year is labeled 'Given in problem statement' when explicitly provided."""
+        q = "Our annual demand is 10,000 units, order cost is $50, holding cost is $2 per unit per year, and we operate 250 working days per year. What is our EOQ?"
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.extracted_inputs.get("working_days_per_year"), 250)
+        self.assertIn("| Working Days Per Year (`working_days_per_year`) | 250 | Given in problem statement |", decision.explanation)
+
+    def test_eoq_working_days_status_default_when_days_word_used_elsewhere(self):
+        """Verify working_days_per_year remains 'Default assumption' when word 'days' appears in other context."""
+        q = "Our annual demand is 10,000 units, order cost is $50, and holding cost is $2. Delivery takes 5 days. What is our EOQ?"
+        decision = self.agent.process_question(q)
+        self.assertIn("| Working Days Per Year (`working_days_per_year`) | 365 | Default assumption |", decision.explanation)
+
+    def test_verification_checks_dollar_signs_escaped_for_katex(self):
+        """Verify currency dollar signs in Section 7 are escaped as '\$' to prevent KaTeX inline math merging."""
+        q = "Our annual demand is 10,000 units, order cost is $50, and holding cost is $2 per unit per year. What is our EOQ?"
+        decision = self.agent.process_question(q)
+        explanation = decision.explanation
+        sec7_start = explanation.find("### 7. Verification Checks")
+        sec8_start = explanation.find("### 8. Assumptions")
+        self.assertTrue(sec7_start != -1 and sec8_start != -1)
+        sec7_text = explanation[sec7_start:sec8_start]
+        # Check that the first-order optimality line has escaped dollar signs
+        self.assertIn(r"Annual Ordering Cost (\$707.11) equals Annual Holding Cost (\$707.11)", sec7_text)
+        # Check there are no unescaped bare '$' before numbers in section 7
+        import re
+        bare_currency = re.findall(r"(?<!\\)\$\d+", sec7_text)
+        self.assertEqual(len(bare_currency), 0, f"Unescaped currency dollar signs found in Section 7: {bare_currency}")
+
 
 # ===========================================================================
 # 9. CSV Data Analysis Tests (Streamlit Integration)
