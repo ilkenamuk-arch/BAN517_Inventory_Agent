@@ -271,12 +271,12 @@ class InventoryDecisionAgent:
                 rf"holding\s+cost\s*(?:is|=|:|of)?\s*({num_pat})%\s*(?:of\s+(?:unit\s+)?(?:price|cost))?",
             ], q)
 
+            # Unit Purchase Price / Procurement Cost (Must NOT capture holding cost or order cost)
             inputs["unit_cost"] = extract_pattern([
-                rf"(?:unit\s+cost|purchase\s+cost|purchase\s+price|unit\s+price|wholesale\s+price|item\s+cost|procurement\s+cost)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
-                rf"costs?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit|each|to\s+purchase|to\s+buy)",
-                rf"price\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit|each)?",
-                rf"[\$]\s*({num_pat})\s*per\s+unit",
-            ], q) or 0.0
+                rf"(?:purchase\s+price|purchase\s+cost|unit\s+purchase\s+price|unit\s+purchase\s+cost|unit\s+cost|unit\s+price|wholesale\s+price|item\s+cost|item\s+price|procurement\s+cost|acquisition\s+cost)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
+                rf"(?<!holding\s)(?<!carrying\s)(?<!storage\s)(?<!setup\s)(?<!order\s)(?<!ordering\s)costs?\s*[\$]?\s*({num_pat})\s*(?:to\s+purchase|to\s+buy|wholesale|each|per\s+unit)",
+                rf"(?<!holding\s)(?<!carrying\s)price\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit|each)?",
+            ], q)
 
             inputs["working_days_per_year"] = extract_pattern([
                 rf"({num_pat})\s*(?:operating|working)?\s*days\s*per\s*year",
@@ -614,7 +614,7 @@ class InventoryDecisionAgent:
                 order_cost=inputs["order_cost"],
                 holding_cost=inputs.get("holding_cost"),
                 holding_rate=inputs.get("holding_rate"),
-                unit_cost=inputs.get("unit_cost", 0.0),
+                unit_cost=inputs.get("unit_cost"),
                 working_days_per_year=int(inputs.get("working_days_per_year", self.default_working_days)),
             )
             return tool_name, res
@@ -843,17 +843,19 @@ class InventoryDecisionAgent:
         # 1. Inputs Extracted
         # -------------------------------------------------------------------
         lines.append("### 1. Inputs Extracted")
-        lines.append("| Parameter | Extracted Value |")
-        lines.append("| :--- | :--- |")
+        lines.append("| Parameter | Extracted Value | Status / Notes |")
+        lines.append("| :--- | :--- | :--- |")
         inputs_dict = getattr(result, "inputs_extracted", inputs)
         for k, v in inputs_dict.items():
+            clean_k = k.replace("_", " ").title()
             if v is not None:
                 if isinstance(v, float):
                     v_str = f"${v:,.2f}" if any(c in k.lower() for c in ["cost", "price", "salvage", "penalty"]) else (f"{v:,.4f}".rstrip("0").rstrip(".") if "." in f"{v:,.4f}" else f"{v:,.0f}")
                 else:
                     v_str = str(v)
-                clean_k = k.replace("_", " ").title()
-                lines.append(f"| {clean_k} (`{k}`) | {v_str} |")
+                lines.append(f"| {clean_k} (`{k}`) | {v_str} | Given in problem statement |")
+            else:
+                lines.append(f"| {clean_k} (`{k}`) | *Not provided* | Optional (not required when holding cost H is given directly) |")
         lines.append("")
 
         # -------------------------------------------------------------------
@@ -875,7 +877,8 @@ class InventoryDecisionAgent:
         for f_name, f_latex in formulas.items():
             clean_name = f_name.replace("_", " ").title()
             lines.append(f"- **{clean_name}:**")
-            lines.append(f"  $${f_latex}$$")
+            safe_latex = re.sub(r'(?<!\\)(?<!\\text\{)\$', r'\\text{\$}', str(f_latex))
+            lines.append(f"  $${safe_latex}$$")
         lines.append("")
 
         # -------------------------------------------------------------------
@@ -886,7 +889,8 @@ class InventoryDecisionAgent:
         for f_name, f_val in formulas_sub.items():
             clean_name = f_name.replace("_", " ").title()
             lines.append(f"- **{clean_name}:**")
-            lines.append(f"  $${f_val}$$")
+            safe_latex = re.sub(r'(?<!\\)(?<!\\text\{)\$', r'\\text{\$}', str(f_val))
+            lines.append(f"  $${safe_latex}$$")
         lines.append("")
 
         # -------------------------------------------------------------------
@@ -907,9 +911,12 @@ class InventoryDecisionAgent:
             lines.append(f"| **Annual Ordering Cost ($AOC$)** | ${r.annual_order_cost:,.2f} | {pct_order:.1f}% |")
             lines.append(f"| **Annual Holding Cost ($AHC$)** | ${r.annual_holding_cost:,.2f} | {pct_holding:.1f}% |")
             lines.append(f"| **Total Annual Inventory Cost ($TAC$)** | **${r.total_annual_inventory_cost:,.2f}** | 100.0% |")
-            if r.unit_cost > 0:
+            if r.unit_cost is not None and r.unit_cost > 0:
                 lines.append(f"| Annual Purchase Cost ($APC = D \\cdot C$) | ${r.annual_demand * r.unit_cost:,.2f} | — |")
                 lines.append(f"| **Total Annual Cost ($TC$)** | **${r.total_annual_cost:,.2f}** | — |")
+            else:
+                lines.append(f"| Annual Purchase Cost ($APC = D \\cdot C$) | *Not provided (excluded)* | — |")
+                lines.append(f"| **Total Annual Cost ($TC$)** | **${r.total_annual_inventory_cost:,.2f}** *(TAC only)* | — |")
             lines.append("")
             lines.append("#### Practical Discrete Integer Batch Evaluation:")
             lines.append(f"- Exact continuous EOQ: `{r.eoq:.2f}` units")
@@ -1007,8 +1014,10 @@ class InventoryDecisionAgent:
             lines.append(f"- **Order Frequency ($N$):** **{r.orders_per_year:.2f} orders/year**")
             lines.append(f"- **Cycle Time ($T$):** **{r.cycle_time_days:.1f} operating days** ({r.cycle_time_weeks:.1f} weeks between orders)")
             lines.append(f"- **Minimized Total Annual Inventory Cost (TAC):** **${r.total_annual_inventory_cost:,.2f}/year**")
-            if r.unit_cost > 0:
+            if r.unit_cost is not None and r.unit_cost > 0:
                 lines.append(f"- **Total Annual Cost (including purchase):** **${r.total_annual_cost:,.2f}/year**")
+            else:
+                lines.append(f"- **Total Annual Cost (excluding purchase):** **${r.total_annual_inventory_cost:,.2f}/year** *(Unit purchase price C not specified)*")
         elif model == ModelType.QUANTITY_DISCOUNT:
             r: QuantityDiscountResult = result
             lines.append(f"- **Optimal Order Quantity ($Q^*$):** **{r.optimal_order_quantity:,.0f} units**")
@@ -1125,7 +1134,7 @@ class InventoryDecisionAgent:
             if not extracted_inputs.get("order_cost"):
                 missing_critical.append("Order/Setup Cost (S)")
             has_h = extracted_inputs.get("holding_cost") is not None
-            has_i_c = (extracted_inputs.get("holding_rate") is not None) and (extracted_inputs.get("unit_cost", 0.0) > 0)
+            has_i_c = (extracted_inputs.get("holding_rate") is not None) and (extracted_inputs.get("unit_cost") is not None and extracted_inputs.get("unit_cost") > 0)
             if not has_h and not has_i_c:
                 if not extracted_inputs.get("holding_cost") and not extracted_inputs.get("holding_rate"):
                     missing_critical.append("Holding Cost (H) or Holding Rate (i)")

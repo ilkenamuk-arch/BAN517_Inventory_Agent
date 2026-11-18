@@ -64,7 +64,7 @@ class EOQResult:
     annual_demand: float
     order_cost: float
     holding_cost: float
-    unit_cost: float
+    unit_cost: Optional[float]
     working_days_per_year: int
 
     # Intermediate Calculations
@@ -76,7 +76,7 @@ class EOQResult:
     annual_order_cost: float
     annual_holding_cost: float
     total_annual_inventory_cost: float
-    annual_purchase_cost: float
+    annual_purchase_cost: Optional[float]
     total_annual_cost: float
     rounded_order_cost: float
     rounded_holding_cost: float
@@ -148,7 +148,6 @@ def calculate_eoq(
         raise ValueError(f"Working days per year must be positive (got {working_days_per_year}).")
 
     # Determine holding cost H
-    effective_unit_cost = unit_cost if unit_cost is not None else 0.0
     if holding_cost is None:
         if holding_rate is not None and unit_cost is not None:
             if holding_rate <= 0:
@@ -156,6 +155,8 @@ def calculate_eoq(
             if unit_cost <= 0:
                 raise ValueError(f"Unit cost must be strictly positive when using holding rate (got {unit_cost}).")
             computed_h = holding_rate * unit_cost
+        elif holding_rate is not None and unit_cost is None:
+            raise ValueError("Missing required numerical input: 'unit_cost' (C) is required when holding rate (i) is provided.")
         else:
             raise ValueError("Missing required numerical input: must provide either 'holding_cost' or both 'holding_rate' and 'unit_cost'.")
     else:
@@ -175,14 +176,23 @@ def calculate_eoq(
     annual_order_cost = (demand / eoq) * order_cost
     annual_holding_cost = (eoq / 2.0) * computed_h
     total_annual_inventory_cost = annual_order_cost + annual_holding_cost
-    annual_purchase_cost = demand * effective_unit_cost
-    total_annual_cost = annual_purchase_cost + total_annual_inventory_cost
+
+    # If unit purchase cost is specified, compute annual purchasing expenditure
+    if unit_cost is not None and unit_cost > 0:
+        annual_purchase_cost = demand * unit_cost
+        total_annual_cost = annual_purchase_cost + total_annual_inventory_cost
+    else:
+        annual_purchase_cost = None
+        total_annual_cost = total_annual_inventory_cost
 
     # Practical integer rounding evaluation
     rounded_eoq = max(1, round(eoq))
     rounded_order_cost = (demand / rounded_eoq) * order_cost
     rounded_holding_cost = (rounded_eoq / 2.0) * computed_h
-    rounded_total_cost = annual_purchase_cost + rounded_order_cost + rounded_holding_cost
+    if annual_purchase_cost is not None:
+        rounded_total_cost = annual_purchase_cost + rounded_order_cost + rounded_holding_cost
+    else:
+        rounded_total_cost = rounded_order_cost + rounded_holding_cost
     cost_penalty_rounded = rounded_total_cost - total_annual_cost
 
     # Intermediate calculations dictionary
@@ -217,7 +227,7 @@ def calculate_eoq(
         "order_cost_S": order_cost,
         "holding_cost_H": computed_h,
         "holding_rate_i": holding_rate,
-        "unit_cost_C": effective_unit_cost,
+        "unit_cost_C": unit_cost,
         "working_days_per_year": working_days_per_year,
     }
 
@@ -245,10 +255,21 @@ def calculate_eoq(
         "total_annual_inventory_cost_TAC": r"TAC = \left(\frac{D}{Q}\right) S + \left(\frac{Q}{2}\right) H",
         "order_frequency_N": r"N = \frac{D}{Q^*}",
         "cycle_time_days_T": r"T_{\text{days}} = \left(\frac{Q^*}{D}\right) \times \text{Working Days}",
-        "total_annual_cost_TC": r"TC = D \cdot C + \left(\frac{D}{Q}\right) S + \left(\frac{Q}{2}\right) H",
+        "total_annual_cost_TC": r"TC = D \cdot C + \left(\frac{D}{Q}\right) S + \left(\frac{Q}{2}\right) H" if unit_cost is not None else r"TC = TAC = \left(\frac{D}{Q}\right) S + \left(\frac{Q}{2}\right) H",
     }
 
-    # 4. Formula with Substituted Values
+    # 4. Formula with Substituted Values (formatted for KaTeX display math)
+    if unit_cost is not None and unit_cost > 0:
+        tc_substituted = (
+            f"TC = ({demand:,.2f} \\cdot \\text{{\\$}}{unit_cost:,.2f}) + \\text{{\\$}}{total_annual_inventory_cost:,.2f} = "
+            f"\\text{{\\$}}{annual_purchase_cost:,.2f} + \\text{{\\$}}{total_annual_inventory_cost:,.2f} = \\text{{\\$}}{total_annual_cost:,.2f}/\\text{{year}}"
+        )
+    else:
+        tc_substituted = (
+            f"TC = TAC = \\text{{\\$}}{annual_order_cost:,.2f} + \\text{{\\$}}{annual_holding_cost:,.2f} = \\text{{\\$}}{total_annual_inventory_cost:,.2f}/\\text{{year}} "
+            f"\\quad \\text{{(Unit purchase cost C not provided; purchasing expenditure excluded)}}"
+        )
+
     formula_with_substituted_values = {
         "optimal_order_quantity_Q*": (
             f"Q^* = \\sqrt{{\\frac{{2 \\cdot {demand:,.2f} \\cdot {order_cost:,.2f}}}{{{computed_h:,.2f}}}}} = "
@@ -257,24 +278,21 @@ def calculate_eoq(
         ),
         "annual_ordering_cost_AOC": (
             f"AOC = \\left(\\frac{{{demand:,.2f}}}{{{eoq:,.2f}}}\\right) \\cdot {order_cost:,.2f} = "
-            f"{orders_per_year:,.4f} \\cdot {order_cost:,.2f} = ${annual_order_cost:,.2f}/\\text{{year}}"
+            f"{orders_per_year:,.4f} \\cdot {order_cost:,.2f} = \\text{{\\$}}{annual_order_cost:,.2f}/\\text{{year}}"
         ),
         "annual_holding_cost_AHC": (
             f"AHC = \\left(\\frac{{{eoq:,.2f}}}{{2}}\\right) \\cdot {computed_h:,.2f} = "
-            f"{eoq / 2.0:,.4f} \\cdot {computed_h:,.2f} = ${annual_holding_cost:,.2f}/\\text{{year}}"
+            f"{eoq / 2.0:,.4f} \\cdot {computed_h:,.2f} = \\text{{\\$}}{annual_holding_cost:,.2f}/\\text{{year}}"
         ),
         "total_annual_inventory_cost_TAC": (
-            f"TAC = ${annual_order_cost:,.2f} + ${annual_holding_cost:,.2f} = ${total_annual_inventory_cost:,.2f}/\\text{{year}}"
+            f"TAC = \\text{{\\$}}{annual_order_cost:,.2f} + \\text{{\\$}}{annual_holding_cost:,.2f} = \\text{{\\$}}{total_annual_inventory_cost:,.2f}/\\text{{year}}"
         ),
         "order_frequency_N": f"N = \\frac{{{demand:,.2f}}}{{{eoq:,.2f}}} = {orders_per_year:,.2f} \\text{{ orders/year}}",
         "cycle_time_days_T": (
             f"T_{{\\text{{days}}}} = \\left(\\frac{{{eoq:,.2f}}}{{{demand:,.2f}}}\\right) \\cdot {working_days_per_year} = "
             f"{cycle_time_days:,.2f} \\text{{ operating days}}"
         ),
-        "total_annual_cost_TC": (
-            f"TC = ({demand:,.2f} \\cdot {effective_unit_cost:,.2f}) + ${total_annual_inventory_cost:,.2f} = "
-            f"${annual_purchase_cost:,.2f} + ${total_annual_inventory_cost:,.2f} = ${total_annual_cost:,.2f}/\\text{{year}}"
-        ),
+        "total_annual_cost_TC": tc_substituted,
     }
 
     # Operational assumptions
@@ -284,8 +302,11 @@ def calculate_eoq(
         "Setup / ordering cost (S) is fixed per order regardless of the number of units ordered.",
         "Inventory carrying cost (H) is linear and strictly proportional to average inventory level (Q/2).",
         "No shortages, backorders, or stockouts are permitted.",
-        "Purchase price per unit (C) is constant and independent of order quantity (no volume discounts).",
     ]
+    if unit_cost is not None and unit_cost > 0:
+        assumptions.append(f"Purchase price per unit (C = ${unit_cost:,.2f}) is constant and independent of order quantity (no volume discounts).")
+    else:
+        assumptions.append("Unit purchase cost (C) was not specified in the problem statement. When annual holding cost (H) is specified directly ($/unit/year), the optimal order quantity (Q*) and total inventory carrying & setup cost (TAC) are independent of unit purchase price. Total purchasing expenditure (D * C) is omitted from total annual cost.")
 
     # Verification checks
     cost_diff = abs(annual_order_cost - annual_holding_cost)
@@ -304,13 +325,13 @@ def calculate_eoq(
             "order_cost": order_cost,
             "holding_cost": computed_h,
             "holding_rate": holding_rate,
-            "unit_cost": effective_unit_cost,
+            "unit_cost": unit_cost,
             "working_days_per_year": working_days_per_year,
         },
         annual_demand=demand,
         order_cost=order_cost,
         holding_cost=computed_h,
-        unit_cost=effective_unit_cost,
+        unit_cost=unit_cost,
         working_days_per_year=working_days_per_year,
         intermediate_calculations=intermediate,
         orders_per_year=orders_per_year,
@@ -598,12 +619,12 @@ def calculate_quantity_discount(
         tier_label = f"Tier_{t.tier_index + 1}"
         formula_with_substituted_values[tier_label] = (
             f"Q_{t.tier_index + 1}^* = \\sqrt{{\\frac{{2 \\cdot {demand:,.2f} \\cdot {order_cost:,.2f}}}{{{t.holding_cost:,.2f}}}}} = {t.calculated_eoq:,.2f} \\text{{ units}} \\implies "
-            f"Candidate Q = {t.candidate_qty:,.2f} ({'feasible' if t.is_feasible else 'breakpoint adjusted'}); "
+            f"\\text{{Candidate }} Q = {t.candidate_qty:,.2f} \\text{{ ({'feasible' if t.is_feasible else 'breakpoint adjusted'})}}; "
             f"TC = ({demand:,.2f} \\cdot {t.unit_price:,.2f}) + \\left(\\frac{{{demand:,.2f}}}{{{t.candidate_qty:,.2f}}} \\cdot {order_cost:,.2f}\\right) + \\left(\\frac{{{t.candidate_qty:,.2f}}}{{2}} \\cdot {t.holding_cost:,.2f}\\right) = "
-            f"${t.annual_purchase_cost:,.2f} + ${t.annual_order_cost:,.2f} + ${t.annual_holding_cost:,.2f} = ${t.total_annual_cost:,.2f}"
+            f"\\text{{\\$}}{t.annual_purchase_cost:,.2f} + \\text{{\\$}}{t.annual_order_cost:,.2f} + \\text{{\\$}}{t.annual_holding_cost:,.2f} = \\text{{\\$}}{t.total_annual_cost:,.2f}"
         )
     formula_with_substituted_values["Optimal_Decision"] = (
-        f"Optimal lot size Q* = {optimal_qty:,.2f} units at Tier {best_tier.tier_index + 1} (${optimal_price:.2f}/unit) with Min Total Cost = ${min_total_cost:,.2f}"
+        f"Q^* = {optimal_qty:,.2f} \\text{{ units (Tier {best_tier.tier_index + 1} at \\text{{\\$}}{optimal_price:.2f}/unit)}}, \\quad \\min TC = \\text{{\\$}}{min_total_cost:,.2f}"
     )
 
     assumptions = [
@@ -1613,12 +1634,12 @@ def calculate_newsvendor(
         (f"Q^* = {uniform_min:,.2f} + {critical_ratio:.4f} \\cdot ({uniform_max:,.2f} - {uniform_min:,.2f}) = {optimal_q:,.2f} \\text{{ units}}" if dist_type == "uniform" else f"Q^* = {optimal_q:,.2f} \\text{{ units}}")
     )
     formula_with_substituted_values = {
-        "Cost_of_Underage_Cu": f"C_u = {eff_price:,.2f} - {eff_cost:,.2f} + {effective_penalty:,.2f} = ${cost_underage:,.2f}/\\text{{unit}}",
-        "Cost_of_Overage_Co": f"C_o = {eff_cost:,.2f} - {effective_salvage:,.2f} = ${cost_overage:,.2f}/\\text{{unit}}",
+        "Cost_of_Underage_Cu": f"C_u = {eff_price:,.2f} - {eff_cost:,.2f} + {effective_penalty:,.2f} = \\text{{\\$}}{cost_underage:,.2f}/\\text{{unit}}",
+        "Cost_of_Overage_Co": f"C_o = {eff_cost:,.2f} - {effective_salvage:,.2f} = \\text{{\\$}}{cost_overage:,.2f}/\\text{{unit}}",
         "Critical_Ratio_CR": f"CR = \\frac{{{cost_underage:,.2f}}}{{{cost_underage:,.2f} + {cost_overage:,.2f}}} = \\frac{{{cost_underage:,.2f}}}{{{cost_underage + cost_overage:,.2f}}} = {critical_ratio:.4f}",
         "Optimal_Order_Quantity_Q*": q_sub,
-        "Expected_Profit": f"E[\\text{{Profit}}] = ({eff_price:,.2f} \\cdot {exp_sales:,.1f}) + ({effective_salvage:,.2f} \\cdot {exp_leftover:,.1f}) - ({eff_cost:,.2f} \\cdot {optimal_q:,.1f}) = ${exp_profit:,.2f}",
-        "Expected_Value_of_Perfect_Information": f"EVPI = ${profit_pi:,.2f} - ${exp_profit:,.2f} = ${evpi:,.2f}",
+        "Expected_Profit": f"E[\\text{{Profit}}] = ({eff_price:,.2f} \\cdot {exp_sales:,.1f}) + ({effective_salvage:,.2f} \\cdot {exp_leftover:,.1f}) - ({eff_cost:,.2f} \\cdot {optimal_q:,.1f}) = \\text{{\\$}}{exp_profit:,.2f}",
+        "Expected_Value_of_Perfect_Information": f"EVPI = \\text{{\\$}}{profit_pi:,.2f} - \\text{{\\$}}{exp_profit:,.2f} = \\text{{\\$}}{evpi:,.2f}",
     }
 
     assumptions = [
@@ -2022,7 +2043,7 @@ def classify_multicriteria_inventory(
 
     formula_with_substituted_values = {
         "Weights": f"\\text{{Score}} = ({sales_weight} \\cdot \\text{{Score}}_{{\\text{{Sales}}}}) + ({hits_weight} \\cdot \\text{{Score}}_{{\\text{{Hits}}}})",
-        "Total_Sales": f"\\sum \\text{{Sales}} = ${total_sales:,.2f}",
+        "Total_Sales": f"\\sum \\text{{Sales}} = \\text{{\\$}}{total_sales:,.2f}",
         "Total_Hits": f"\\sum \\text{{Hits}} = {total_hits:,.0f} \\text{{ transactions}}",
     }
 

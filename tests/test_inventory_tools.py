@@ -130,6 +130,16 @@ class TestCalculateEOQ(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_eoq(demand=1000, order_cost=0, holding_cost=2.0)
 
+    def test_eoq_without_unit_cost_does_not_invent_value(self):
+        """Verify that when unit purchase cost is omitted, EOQ does not invent a cost."""
+        res = calculate_eoq(demand=10000, order_cost=50, holding_cost=2.0)
+        self.assertIsNone(res.unit_cost)
+        self.assertIsNone(res.annual_purchase_cost)
+        self.assertAlmostEqual(res.total_annual_cost, 1414.2136, places=3)
+        self.assertAlmostEqual(res.total_annual_inventory_cost, 1414.2136, places=3)
+        self.assertIsNone(res.inputs_extracted.get("unit_cost_C"))
+        self.assertTrue(any("not specified" in a.lower() for a in res.assumptions))
+
 
 # ===========================================================================
 # 2. calculate_quantity_discount() Tests
@@ -926,6 +936,29 @@ class TestStudentVerificationOutputs(unittest.TestCase):
                 pos = decision.explanation.find(header)
                 self.assertTrue(pos > last_pos, f"Header {header} out of order in explanation: {pos} <= {last_pos}")
                 last_pos = pos
+
+    def test_eoq_agent_does_not_falsely_extract_holding_cost_as_unit_cost(self):
+        """Verify that holding cost is $2 per unit is not mistakenly captured as unit purchase cost."""
+        q = "Our annual demand is 10,000 units, order cost is $50 per order, and holding cost is $2 per unit. What is our EOQ?"
+        decision = self.agent.process_question(q)
+        self.assertTrue(decision.verification_passed)
+        self.assertIsNone(decision.extracted_inputs.get("unit_cost"))
+        self.assertIsNone(decision.calculation_result.unit_cost)
+        self.assertIsNone(decision.calculation_result.annual_purchase_cost)
+        self.assertAlmostEqual(decision.calculation_result.total_annual_cost, 1414.2136, places=3)
+        self.assertIn("*Not provided*", decision.explanation)
+        self.assertNotIn("$20,000.00", decision.explanation)
+
+    def test_latex_formulas_have_no_unescaped_dollar_signs(self):
+        """Verify that LaTeX formulas with substituted values avoid bare dollar signs that break KaTeX."""
+        import re
+        q = "Our annual demand is 10,000 units, order cost is $50 per order, and holding cost is $2 per unit. What is our EOQ?"
+        decision = self.agent.process_question(q)
+        formulas_sub = decision.calculation_result.formula_with_substituted_values
+        for k, formula_str in formulas_sub.items():
+            # Check for unescaped dollar signs (bare '$' not preceded by '\')
+            bare_dollars = re.findall(r"(?<!\\)(?<!\\text\{)\$", formula_str)
+            self.assertEqual(len(bare_dollars), 0, f"Unescaped dollar sign found in formula '{k}': {formula_str}")
 
 
 # ===========================================================================
