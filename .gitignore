@@ -1,0 +1,63 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment variables, credentials, and secrets
+.env
+.env.*
+!.env.example
+*.env
+*.key
+*.pem
+*.cert
+*.crt
+*.pfx
+*.p12
+*.token
+credentials.json
+client_secret*.json
+id_rsa*
+id_ed25519*
+
+# Streamlit secrets and local runtime configuration
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Testing & Coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE & Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Antigravity

@@ -1,0 +1,16 @@
+# Supply Chain Analytics Inventory Decision Agent Dependencies
+# Core engine is zero-dependency (runs on Python 3.8+ using standard library: math, statistics, dataclasses, re, json, argparse)
+
+# Testing and verification
+pytest>=7.4.0
+
+# Optional Web UI dashboard (launch with: streamlit run app.py)
+streamlit>=1.30.0
+
+# Optional terminal formatting & visualization enhancements
+rich>=13.5.0
+tabulate>=0.9.0
+
+# Optional extended scientific computation
+numpy>=1.24.0
+scipy>=1.10.0
