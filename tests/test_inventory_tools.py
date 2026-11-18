@@ -924,5 +924,60 @@ class TestStudentVerificationOutputs(unittest.TestCase):
                 last_pos = pos
 
 
+# ===========================================================================
+# 9. CSV Data Analysis Tests (Streamlit Integration)
+# ===========================================================================
+class TestCSVDataAnalysis(unittest.TestCase):
+    """Verify CSV validation and pandas calculations for Streamlit data analysis."""
+
+    def test_missing_required_columns(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed in current test interpreter")
+
+        from app import analyze_inventory_dataframe
+
+        # Missing 'Category' and 'Unit Cost'
+        df_invalid = pd.DataFrame({"Product": ["Widget A"], "Units": [100]})
+        missing, results = analyze_inventory_dataframe(df_invalid)
+        self.assertIn("Category", missing)
+        self.assertIn("Unit Cost", missing)
+        self.assertEqual(results, {})
+
+    def test_valid_inventory_calculations(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed in current test interpreter")
+
+        from app import analyze_inventory_dataframe
+
+        data = {
+            "Product": ["SKU-1", "SKU-2", "SKU-3", "SKU-4"],
+            "Category": ["Hardware", "Hardware", "Tools", "Tools"],
+            "Units": [200, 800, 300, 100],
+            "Unit Cost": [15.0, 10.0, 50.0, 25.0],
+        }
+        df = pd.DataFrame(data)
+        missing, results = analyze_inventory_dataframe(df)
+
+        self.assertEqual(missing, [])
+        # 1. Total Units: 200 + 800 + 300 + 100 = 1400
+        self.assertEqual(results["total_units"], 1400.0)
+        # 2. Average Unit Cost: (15 + 10 + 50 + 25) / 4 = 25.0
+        self.assertEqual(results["avg_unit_cost"], 25.0)
+        # 3. Product with highest units: SKU-2 (800)
+        self.assertEqual(results["highest_units_product"], "SKU-2")
+        self.assertEqual(results["highest_units_val"], 800.0)
+        # 4. Total units by Category: Hardware=1000, Tools=400
+        cat_dict = dict(zip(results["units_by_category"]["Category"], results["units_by_category"]["Units"]))
+        self.assertEqual(cat_dict["Hardware"], 1000.0)
+        self.assertEqual(cat_dict["Tools"], 400.0)
+        # 5. Inventory Value = Units * Unit Cost: 200*15=3000, 800*10=8000, 300*50=15000, 100*25=2500 -> sum = 28500
+        self.assertIn("Inventory Value", results["dataframe"].columns)
+        self.assertEqual(results["total_inventory_value"], 28500.0)
+
+
 if __name__ == "__main__":
     unittest.main()

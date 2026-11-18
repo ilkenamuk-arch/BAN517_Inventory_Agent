@@ -6,6 +6,7 @@ pytest>=7.4.0
 
 # Optional Web UI dashboard (launch with: streamlit run app.py)
 streamlit>=1.30.0
+pandas>=2.0.0
 
 # Optional terminal formatting & visualization enhancements
 rich>=13.5.0
