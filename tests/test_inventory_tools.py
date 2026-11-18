@@ -996,6 +996,87 @@ class TestStudentVerificationOutputs(unittest.TestCase):
         bare_currency = re.findall(r"(?<!\\)\$\d+", sec7_text)
         self.assertEqual(len(bare_currency), 0, f"Unescaped currency dollar signs found in Section 7: {bare_currency}")
 
+    def test_fixed_period_review_latex_math_formatting_in_section_5(self):
+        """Verify Fixed-Period Review Section 5 renders LaTeX formulas as math ($...$) rather than raw code backticks."""
+        q = (
+            "Daily demand is 20 units with standard deviation 5 units. Review period is 14 days and lead time is 7 days. "
+            "Target service level is 98%. Currently, on-hand inventory is 150 units, on-order is 50 units, and there are 10 backorders. "
+            "What is the target order-up-to level and how many units should be ordered today?"
+        )
+        decision = self.agent.process_question(q)
+        explanation = decision.explanation
+        sec5_start = explanation.find("### 5. Intermediate Calculations")
+        sec6_start = explanation.find("### 6. Final Answer")
+        sec5_text = explanation[sec5_start:sec6_start]
+
+        # Verify formulas are rendered as LaTeX math and not inside raw code backticks
+        self.assertNotIn(r"`20.0 \cdot 21.0 = 420.0`", sec5_text)
+        self.assertNotIn(r"`5.0 \cdot \sqrt{21.0} = 22.91`", sec5_text)
+        self.assertNotIn(r"`\mu_{R+L} + SS", sec5_text)
+        self.assertNotIn(r"`\max(0, M - IP)", sec5_text)
+
+        self.assertIn(r"\mu_{R+L} = d \cdot (R + L)", sec5_text)
+        self.assertIn(r"\sigma_{R+L} = \sigma_d \cdot \sqrt{R + L}", sec5_text)
+        self.assertIn(r"M = \mu_{R+L} + SS", sec5_text)
+        self.assertIn(r"Q = \max(0, M - IP)", sec5_text)
+
+    def test_fixed_period_review_input_provenance_labels(self):
+        """Verify calculated fields (IP, SS, z) in Fixed-Period Review are labeled 'Calculated'."""
+        q = (
+            "Daily demand is 20 units with standard deviation 5 units. Review period is 14 days and lead time is 7 days. "
+            "Target service level is 98%. Currently, on-hand inventory is 150 units, on-order is 50 units, and there are 10 backorders. "
+            "What is the target order-up-to level and how many units should be ordered today?"
+        )
+        decision = self.agent.process_question(q)
+        explanation = decision.explanation
+
+        self.assertIn("| Z Value (`z_value`) | 2.0537 | Calculated |", explanation)
+        self.assertIn("| Inventory Position (`inventory_position`) | 190 | Calculated |", explanation)
+        self.assertIn("| Safety Stock (`safety_stock`) | 47.0573 | Calculated |", explanation)
+        self.assertIn("| On Hand Inventory (`on_hand_inventory`) | 150 | Given in problem statement |", explanation)
+
+    def test_newsvendor_input_provenance_and_section_5_formatting(self):
+        """Verify Newsvendor input provenance (Calculated Cu/Co, Default g, Uniform descriptions) and bold formatting."""
+        q = (
+            "A retailer sells a seasonal ski jacket for $100 per unit during winter. The wholesale cost is $40 per unit. "
+            "At the end of the season, any unsold jackets are liquidated at a salvage clearance price of $20 per unit. "
+            "Demand is normally distributed with mean 1,000 units and standard deviation 200 units. "
+            "How many jackets should the retailer order?"
+        )
+        decision = self.agent.process_question(q)
+        explanation = decision.explanation
+
+        # 1. Provenance
+        self.assertIn("| Cost Underage Cu (`cost_underage_Cu`) | $60.00 | Calculated |", explanation)
+        self.assertIn("| Cost Overage Co (`cost_overage_Co`) | $20.00 | Calculated |", explanation)
+        self.assertIn("| Penalty Cost G (`penalty_cost_g`) | $0.00 | Default assumption |", explanation)
+        self.assertIn("| Uniform Min A (`uniform_min_a`) | *Not provided* | Optional (only required when demand follows a Uniform distribution) |", explanation)
+        self.assertIn("| Uniform Max B (`uniform_max_b`) | *Not provided* | Optional (only required when demand follows a Uniform distribution) |", explanation)
+
+        # 2. Section 5 formatting - no broken markdown bold or unescaped dollar signs
+        self.assertIn(r"**\$60.00/unit**", explanation)
+        self.assertIn(r"**\$20.00/unit**", explanation)
+        self.assertNotIn("**60.00/unit**", explanation)
+        self.assertNotIn("**20.00/unit**", explanation)
+
+    def test_quantity_discount_headline_formatting(self):
+        """Verify Quantity Discount headline uses escaped dollar signs without broken LaTeX."""
+        q = (
+            "Annual demand is 5,000 units, order cost is $49 per order, and our annual holding cost rate is 20%. "
+            "Our supplier offers the following volume discount schedule: "
+            "$5.00 for orders under 1000, $4.80 for 1000 to 1999 units, and $4.75 for 2000 or more units. "
+            "What order quantity minimizes our total annual procurement and inventory cost?"
+        )
+        decision = self.agent.process_question(q)
+        explanation = decision.explanation
+
+        self.assertIn(r"Order **1,000 units** at **\$4.80/unit** (Tier 2).", explanation)
+        self.assertIn(r"**Minimized Total Annual Cost:** **\$24,725.00**", explanation)
+        self.assertEqual(decision.calculation_result.optimal_order_quantity, 1000)
+        self.assertEqual(decision.calculation_result.best_tier_index, 1)
+        self.assertAlmostEqual(decision.calculation_result.optimal_unit_price, 4.80, places=2)
+        self.assertAlmostEqual(decision.calculation_result.min_total_cost, 24725.00, places=2)
+
 
 # ===========================================================================
 # 9. CSV Data Analysis Tests (Streamlit Integration)

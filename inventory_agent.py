@@ -521,9 +521,11 @@ class InventoryDecisionAgent:
             ], q) or 0.0
 
             # 8. Direct inventory position
-            inputs["inventory_position"] = extract_pattern([
+            ip_extracted = extract_pattern([
                 rf"(?:inventory\s+position|current\s+inventory\s+position)\s*(?:is|=|:|of)?\s*({num_pat})",
             ], q)
+            inputs["inventory_position"] = ip_extracted
+            inputs["_inventory_position_explicit"] = (ip_extracted is not None)
 
             inputs["time_unit"] = "weeks" if "week" in q.lower() else "days"
 
@@ -536,9 +538,9 @@ class InventoryDecisionAgent:
         elif model == ModelType.NEWSVENDOR:
             # 1. Selling price
             inputs["selling_price"] = extract_pattern([
-                rf"sell(?:ing)?(?:\s+\w+){{0,5}}\s+for\s*[\$]?\s*({num_pat})",
+                rf"sell(?:s|ing)?(?:\s+\w+){{0,6}}\s+for\s*[\$]?\s*({num_pat})",
                 rf"(?:selling\s+price|retail\s+price|sales\s+price|revenue\s+per\s+unit)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
-                rf"price\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit|each)?",
+                rf"(?<!salvage\s)(?<!clearance\s)(?<!markdown\s)(?<!scrap\s)price\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit|each)?",
                 rf"sold\s+at\s*[\$]?\s*({num_pat})",
                 rf"[\$]\s*({num_pat})\s*selling\s+price",
             ], q)
@@ -552,12 +554,14 @@ class InventoryDecisionAgent:
             ], q)
 
             # 3. Salvage value
-            inputs["salvage_value"] = extract_pattern([
+            salvage_extracted = extract_pattern([
                 rf"(?:salvage\s+value|clearance\s+price|liquidation\s+value|markdown\s+price|scrap\s+value|salvage\s+price)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
                 rf"salvaged\s+for\s*[\$]?\s*({num_pat})",
                 rf"liquidated\s+at\s*[\$]?\s*({num_pat})",
                 rf"discounted\s+to\s*[\$]?\s*({num_pat})",
-            ], q) or 0.0
+            ], q)
+            inputs["salvage_value"] = salvage_extracted or 0.0
+            inputs["_salvage_explicit"] = (salvage_extracted is not None)
 
             # 4. Underage / Shortage cost (direct)
             inputs["cost_underage"] = extract_pattern([
@@ -571,9 +575,11 @@ class InventoryDecisionAgent:
                 rf"[\$]?\s*({num_pat})\s*(?:overage\s+cost|excess\s+cost)",
             ], q)
 
-            inputs["penalty_cost"] = extract_pattern([
+            penalty_extracted = extract_pattern([
                 rf"(?:penalty\s+cost|goodwill\s+penalty|loss\s+of\s+goodwill)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
-            ], q) or 0.0
+            ], q)
+            inputs["penalty_cost"] = penalty_extracted or 0.0
+            inputs["_penalty_explicit"] = (penalty_extracted is not None)
 
             # 6. Mean demand
             inputs["demand_mean"] = extract_pattern([
@@ -810,14 +816,14 @@ class InventoryDecisionAgent:
             lines.append("## Supply Chain Decision: Economic Order Quantity (EOQ)")
             lines.append("")
             lines.append(f"**Recommended Order Size:** **{r.rounded_eoq:,} units** per order (exact mathematical EOQ: `{r.eoq:.2f}` units).")
-            lines.append(f"**Annual Inventory Management Cost:** **${r.total_annual_inventory_cost:,.2f}/year** across `{r.orders_per_year:.2f}` orders.")
+            lines.append(f"**Annual Inventory Management Cost:** **\\${r.total_annual_inventory_cost:,.2f}/year** across `{r.orders_per_year:.2f}` orders.")
             lines.append("")
         elif model == ModelType.QUANTITY_DISCOUNT:
             r: QuantityDiscountResult = result
             lines.append("## Supply Chain Decision: Quantity Discount Optimization")
             lines.append("")
-            lines.append(f"**Optimal Order Decision:** Order **{r.optimal_order_quantity:,.0f} units** at **${r.optimal_unit_price:.2f}/unit** (Tier {r.best_tier_index + 1}).")
-            lines.append(f"**Minimized Total Annual Cost:** **${r.min_total_cost:,.2f}** (Achieves **${r.cost_savings:,.2f}** / **{r.percentage_savings:.2f}%** net savings vs base un-discounted EOQ).")
+            lines.append(f"**Optimal Order Decision:** Order **{r.optimal_order_quantity:,.0f} units** at **\\${r.optimal_unit_price:.2f}/unit** (Tier {r.best_tier_index + 1}).")
+            lines.append(f"**Minimized Total Annual Cost:** **\\${r.min_total_cost:,.2f}** (Achieves **\\${r.cost_savings:,.2f}** / **{r.percentage_savings:.2f}%** net savings vs base un-discounted EOQ).")
             lines.append("")
         elif model == ModelType.SAFETY_STOCK_ROP:
             r: ROPResult = result
@@ -840,7 +846,7 @@ class InventoryDecisionAgent:
             lines.append("## Supply Chain Decision: Newsvendor Single-Period Critical Fractile")
             lines.append("")
             lines.append(f"**Recommended Order Quantity ($Q^*$):** **{r.rounded_order_quantity:,} units** (Exact: `{r.optimal_order_quantity:.2f}` units).")
-            lines.append(f"**Expected Net Profit:** **${r.expected_profit:,.2f}** (Critical Ratio: `{r.critical_fractile:.4f}`)")
+            lines.append(f"**Expected Net Profit:** **\\${r.expected_profit:,.2f}** (Critical Ratio: `{r.critical_fractile:.4f}`)")
             lines.append("")
 
         # -------------------------------------------------------------------
@@ -860,8 +866,22 @@ class InventoryDecisionAgent:
                 else:
                     v_str = str(v)
 
-                # Check whether working days was explicitly provided in the problem statement
-                if k == "working_days_per_year":
+                # Determine accurate parameter provenance
+                # 1. Calculated / Derived fields
+                if k in ["z_value", "safety_stock"] and model in [ModelType.FIXED_PERIOD_REVIEW, ModelType.SAFETY_STOCK_ROP]:
+                    status_note = "Calculated"
+                elif k == "inventory_position" and model == ModelType.FIXED_PERIOD_REVIEW:
+                    is_ip_direct = inputs.get("_inventory_position_explicit") or (inputs.get("inventory_position") is not None and inputs.get("on_hand_inventory") is None)
+                    status_note = "Given in problem statement" if is_ip_direct else "Calculated"
+                elif k == "cost_underage_Cu" and model == ModelType.NEWSVENDOR:
+                    is_cu_direct = inputs.get("cost_underage") is not None and inputs.get("selling_price") is None
+                    status_note = "Given in problem statement" if is_cu_direct else "Calculated"
+                elif k == "cost_overage_Co" and model == ModelType.NEWSVENDOR:
+                    is_co_direct = inputs.get("cost_overage") is not None and inputs.get("unit_cost") is None
+                    status_note = "Given in problem statement" if is_co_direct else "Calculated"
+
+                # 2. Default assumptions
+                elif k == "working_days_per_year" and model == ModelType.EOQ:
                     is_working_days_explicit = inputs.get("_working_days_explicit")
                     if is_working_days_explicit is None:
                         num_pat = r"\d+(?:,\d{3})*(?:\.\d+)?"
@@ -871,12 +891,48 @@ class InventoryDecisionAgent:
                             re.IGNORECASE,
                         ))
                     status_note = "Given in problem statement" if is_working_days_explicit else "Default assumption"
+                elif k == "penalty_cost_g" and model == ModelType.NEWSVENDOR:
+                    is_penalty_explicit = inputs.get("_penalty_explicit")
+                    if is_penalty_explicit is None:
+                        is_penalty_explicit = bool(re.search(r'\b(?:penalty|goodwill)\b', question, re.IGNORECASE))
+                    status_note = "Given in problem statement" if is_penalty_explicit else "Default assumption"
+                elif k == "salvage_value_s" and model == ModelType.NEWSVENDOR and v == 0.0:
+                    is_salvage_explicit = inputs.get("_salvage_explicit")
+                    if is_salvage_explicit is None:
+                        is_salvage_explicit = bool(re.search(r'\b(?:salvage|clearance|scrap|markdown|liquidat)\b', question, re.IGNORECASE))
+                    status_note = "Given in problem statement" if is_salvage_explicit else "Default assumption"
+                elif k == "lead_time_sd_sigma_L" and model == ModelType.SAFETY_STOCK_ROP and v == 0.0:
+                    has_lt_sd = bool(re.search(r'\b(?:lead\s+time\s+standard\s+deviation|lead\s+time\s+sd|lead\s+time\s+sigma)\b', question, re.IGNORECASE))
+                    status_note = "Given in problem statement" if has_lt_sd else "Default assumption (constant lead time)"
+                elif k == "distribution_type" and model == ModelType.NEWSVENDOR:
+                    has_dist = bool(re.search(r'\b(?:uniform|normal)\b', question, re.IGNORECASE))
+                    status_note = "Given in problem statement" if has_dist else "Default assumption (normal distribution)"
+
+                # 3. Given in problem statement
                 else:
                     status_note = "Given in problem statement"
 
                 lines.append(f"| {clean_k} (`{k}`) | {v_str} | {status_note} |")
             else:
-                lines.append(f"| {clean_k} (`{k}`) | *Not provided* | Optional (not required when holding cost H is given directly) |")
+                # Model-appropriate descriptions for omitted/optional parameters
+                if k in ["uniform_min_a", "uniform_max_b"]:
+                    desc = "Optional (only required when demand follows a Uniform distribution)"
+                elif k in ["holding_cost_H", "order_quantity_Q"] and model == ModelType.SAFETY_STOCK_ROP:
+                    desc = "Optional (not required to determine safety stock or ROP)"
+                elif k == "fixed_holding_cost_H" and model == ModelType.QUANTITY_DISCOUNT:
+                    desc = "Optional (holding rate i was specified instead)"
+                elif k == "holding_rate_i" and model == ModelType.QUANTITY_DISCOUNT:
+                    desc = "Optional (fixed holding cost H was specified instead)"
+                elif k in ["on_hand_inventory", "on_order_inventory", "backorders", "inventory_position"] and model == ModelType.FIXED_PERIOD_REVIEW:
+                    desc = "Optional (only required when determining current cycle order quantity Q)"
+                elif k == "service_level_CSL":
+                    desc = "Optional (deterministic demand & lead time)"
+                elif k in ["holding_rate_i", "unit_cost_C"] and model == ModelType.EOQ:
+                    desc = "Optional (not required when holding cost H is given directly)"
+                else:
+                    desc = "Optional (not required for optimal decision)"
+
+                lines.append(f"| {clean_k} (`{k}`) | *Not provided* | {desc} |")
         lines.append("")
 
         # -------------------------------------------------------------------
@@ -958,8 +1014,8 @@ class InventoryDecisionAgent:
                 star = " **(OPTIMAL)**" if t.tier_index == r.best_tier_index else ""
                 lines.append(f"| Tier {t.tier_index + 1}{star} | {t.min_qty:,.0f} to {max_str} | ${t.unit_price:.2f} | {t.calculated_eoq:,.1f} | {t.candidate_qty:,.1f} | {feas_str} | ${t.annual_purchase_cost:,.2f} | ${t.annual_order_cost:,.2f} | ${t.annual_holding_cost:,.2f} | **${t.total_annual_cost:,.2f}** |")
             lines.append("")
-            lines.append(f"- **Baseline Total Cost (Tier 1 base EOQ):** `${r.baseline_eoq_cost:,.2f}`")
-            lines.append(f"- **Net Annual Cost Savings:** **${r.cost_savings:,.2f}** ({r.percentage_savings:.2f}% savings vs Tier 1 baseline)")
+            lines.append(f"- **Baseline Total Cost (Tier 1 base EOQ):** \\${r.baseline_eoq_cost:,.2f}")
+            lines.append(f"- **Net Annual Cost Savings:** **\\${r.cost_savings:,.2f}** ({r.percentage_savings:.2f}% savings vs Tier 1 baseline)")
             lines.append("")
 
         elif model == ModelType.SAFETY_STOCK_ROP:
@@ -969,12 +1025,12 @@ class InventoryDecisionAgent:
             lines.append(f"- **Standard Deviation of Lead Time Demand ($\\sigma_{{LT}}$):** `{r.stdev_lead_time_demand:.2f}` units")
             if r.service_level is not None:
                 lines.append(f"- **Safety Factor ($z$):** For CSL = `{r.service_level * 100:.1f}%`, $z = \\Phi^{{-1}}({r.service_level:.4f}) = {r.z_factor:.4f}$")
-                lines.append(f"- **Calculated Safety Stock ($SS$):** $z \\cdot \\sigma_{{LT}} = {r.z_factor:.4f} \\cdot {r.stdev_lead_time_demand:.2f} = {r.safety_stock:.2f}$ units")
+                lines.append(f"- **Calculated Safety Stock ($SS$):** $z \\cdot \\sigma_{{LT}} = {r.z_factor:.4f} \\cdot {r.stdev_lead_time_demand:.2f} = {r.safety_stock:.2f}\\text{{ units}}$")
                 lines.append(f"- **Stockout Risk per Cycle:** `{r.stockout_risk_per_cycle * 100:.1f}%`")
             else:
                 lines.append(f"- **Safety Stock ($SS$):** `{r.safety_stock:.2f}` units (Constant demand & constant lead time; zero stockout risk)")
             if r.annual_safety_stock_holding_cost is not None:
-                lines.append(f"- **Annual Safety Stock Carrying Cost:** `${r.annual_safety_stock_holding_cost:,.2f}/year`")
+                lines.append(f"- **Annual Safety Stock Carrying Cost:** \\${r.annual_safety_stock_holding_cost:,.2f}/year")
             if r.average_inventory is not None:
                 lines.append(f"- **Average Cycle + Safety Inventory:** `{r.average_inventory:,.2f}` units")
             lines.append("")
@@ -984,29 +1040,32 @@ class InventoryDecisionAgent:
             lines.append(f"- **Review Interval ($R$):** `{r.review_period}` {r.time_unit}")
             lines.append(f"- **Replenishment Lead Time ($L$):** `{r.lead_time}` {r.time_unit}")
             lines.append(f"- **Total Protection Period ($R + L$):** **{r.protection_period} {r.time_unit}**")
-            lines.append(f"- **Expected Protection Period Demand ($\\mu_{{R+L}}$):** `{r.demand_mean_per_period} \\cdot {r.protection_period} = {r.expected_protection_demand:,.1f}` units")
-            lines.append(f"- **Std Dev of Protection Demand ($\\sigma_{{R+L}}$):** `{r.demand_sd_per_period} \\cdot \\sqrt{{{r.protection_period}}} = {r.stdev_protection_demand:.2f}` units")
+            lines.append(f"- **Expected Protection Period Demand ($\\mu_{{R+L}}$):** $\\mu_{{R+L}} = d \\cdot (R + L) = {r.demand_mean_per_period:,.1f} \\cdot {r.protection_period} = {r.expected_protection_demand:,.1f}\\text{{ units}}$")
+            lines.append(f"- **Std Dev of Protection Demand ($\\sigma_{{R+L}}$):** $\\sigma_{{R+L}} = \\sigma_d \\cdot \\sqrt{{R + L}} = {r.demand_sd_per_period:,.2f} \\cdot \\sqrt{{{r.protection_period}}} = {r.stdev_protection_demand:.2f}\\text{{ units}}$")
             csl_display = f"{r.service_level*100:.1f}%" if r.service_level is not None else "100.0%"
-            lines.append(f"- **Safety Factor ($z$):** `{r.z_factor:.3f}` for CSL = {csl_display}")
-            lines.append(f"- **Safety Stock ($SS$):** `{r.safety_stock:.2f}` units")
-            lines.append(f"- **Order-Up-To Target Level ($M$):** `\\mu_{{R+L}} + SS = {r.expected_protection_demand:.1f} + {r.safety_stock:.2f} = {r.order_up_to_level:.2f}` units")
+            if r.service_level is not None:
+                lines.append(f"- **Safety Factor ($z$):** For CSL = `{csl_display}`, $z = \\Phi^{{-1}}({r.service_level:.4f}) = {r.z_factor:.3f}$")
+            else:
+                lines.append(f"- **Safety Factor ($z$):** $z = {r.z_factor:.3f}$")
+            lines.append(f"- **Safety Stock ($SS$):** $SS = z \\cdot \\sigma_{{R+L}} = {r.z_factor:.3f} \\cdot {r.stdev_protection_demand:.2f} = {r.safety_stock:.2f}\\text{{ units}}$")
+            lines.append(f"- **Order-Up-To Target Level ($M$):** $M = \\mu_{{R+L}} + SS = {r.expected_protection_demand:.1f} + {r.safety_stock:.2f} = {r.order_up_to_level:.2f}\\text{{ units}}$")
             if r.inventory_position is not None:
                 if r.on_hand_inventory is not None:
-                    lines.append(f"- **Inventory Position ($IP$):** On-hand ({r.on_hand_inventory}) + On-order ({r.on_order_inventory}) - Backorders ({r.backorders}) = `{r.inventory_position:.1f}` units")
+                    lines.append(f"- **Inventory Position ($IP$):** On-hand ({r.on_hand_inventory:,.0f}) + On-order ({r.on_order_inventory:,.0f}) - Backorders ({r.backorders:,.0f}) = `{r.inventory_position:.1f}` units")
                 else:
                     lines.append(f"- **Inventory Position ($IP$):** `{r.inventory_position:.1f}` units (given directly)")
-                lines.append(f"- **Recommended Order Quantity ($Q$):** `\\max(0, M - IP) = \\max(0, {r.order_up_to_level:.1f} - {r.inventory_position:.1f}) = {r.recommended_order_quantity:.1f}` units")
+                lines.append(f"- **Recommended Order Quantity ($Q$):** $Q = \\max(0, M - IP) = \\max(0, {r.order_up_to_level:.1f} - {r.inventory_position:.1f}) = {r.recommended_order_quantity:.1f}\\text{{ units}}$")
             lines.append(f"- **Continuous vs Periodic Review Trade-off:** In a continuous review system, safety stock would be `{r.continuous_review_comparison_ss:.1f}` units. Periodic review requires `{r.safety_stock:.1f}` units (**+{r.ss_increase_percentage:.1f}% more safety stock**) because inventory status is not tracked continuously between review epochs.")
             lines.append("")
 
         elif model == ModelType.NEWSVENDOR:
             r: NewsvendorResult = result
             if inputs.get("cost_underage") is not None and inputs.get("cost_overage") is not None and not inputs.get("selling_price"):
-                lines.append(f"- **Cost of Underage ($C_u$):** Given directly as `${r.cost_underage:.2f}` per unit of unmet demand.")
-                lines.append(f"- **Cost of Overage ($C_o$):** Given directly as `${r.cost_overage:.2f}` per unsold unit.")
+                lines.append(f"- **Cost of Underage ($C_u$):** Given directly as \\${r.cost_underage:.2f} per unit of unmet demand.")
+                lines.append(f"- **Cost of Overage ($C_o$):** Given directly as \\${r.cost_overage:.2f} per unsold unit.")
             else:
-                lines.append(f"- **Cost of Underage ($C_u$):** Price (${r.selling_price:.2f}) - Unit Cost (${r.unit_cost:.2f}) + Penalty (${r.penalty_cost:.2f}) = **${r.cost_underage:.2f}/unit** (Lost margin per stockout)")
-                lines.append(f"- **Cost of Overage ($C_o$):** Unit Cost (${r.unit_cost:.2f}) - Salvage (${r.salvage_value:.2f}) = **${r.cost_overage:.2f}/unit** (Net loss per unsold unit)")
+                lines.append(f"- **Cost of Underage ($C_u$):** Price (\\${r.selling_price:.2f}) - Unit Cost (\\${r.unit_cost:.2f}) + Penalty (\\${r.penalty_cost:.2f}) = **\\${r.cost_underage:.2f}/unit** (Lost margin per stockout)")
+                lines.append(f"- **Cost of Overage ($C_o$):** Unit Cost (\\${r.unit_cost:.2f}) - Salvage (\\${r.salvage_value:.2f}) = **\\${r.cost_overage:.2f}/unit** (Net loss per unsold unit)")
             lines.append(f"- **Critical Fractile ($CR$):** $\\frac{{{r.cost_underage:.2f}}}{{{r.cost_underage:.2f} + {r.cost_overage:.2f}}} = \\mathbf{{{r.critical_fractile:.4f}}}$")
             if r.distribution_type == "normal":
                 lines.append(f"- **Optimal Safety Factor ($z^*$):** $\\Phi^{{-1}}({r.critical_fractile:.4f}) = {r.z_factor:.4f}$")
@@ -1034,17 +1093,17 @@ class InventoryDecisionAgent:
             lines.append(f"- **Recommended Order Size ($Q^*$):** **{r.rounded_eoq:,} units** per order (Exact continuous EOQ: `{r.eoq:.2f}` units)")
             lines.append(f"- **Order Frequency ($N$):** **{r.orders_per_year:.2f} orders/year**")
             lines.append(f"- **Cycle Time ($T$):** **{r.cycle_time_days:.1f} operating days** ({r.cycle_time_weeks:.1f} weeks between orders)")
-            lines.append(f"- **Minimized Total Annual Inventory Cost (TAC):** **${r.total_annual_inventory_cost:,.2f}/year**")
+            lines.append(f"- **Minimized Total Annual Inventory Cost (TAC):** **\\${r.total_annual_inventory_cost:,.2f}/year**")
             if r.unit_cost is not None and r.unit_cost > 0:
-                lines.append(f"- **Total Annual Cost (including purchase):** **${r.total_annual_cost:,.2f}/year**")
+                lines.append(f"- **Total Annual Cost (including purchase):** **\\${r.total_annual_cost:,.2f}/year**")
             else:
-                lines.append(f"- **Total Annual Cost (excluding purchase):** **${r.total_annual_inventory_cost:,.2f}/year** *(Unit purchase price C not specified)*")
+                lines.append(f"- **Total Annual Cost (excluding purchase):** **\\${r.total_annual_inventory_cost:,.2f}/year** *(Unit purchase price C not specified)*")
         elif model == ModelType.QUANTITY_DISCOUNT:
             r: QuantityDiscountResult = result
             lines.append(f"- **Optimal Order Quantity ($Q^*$):** **{r.optimal_order_quantity:,.0f} units**")
-            lines.append(f"- **Optimal Discount Tier:** **Tier {r.best_tier_index + 1}** at **${r.optimal_unit_price:.2f}/unit**")
-            lines.append(f"- **Minimized Total Annual Cost ($TC^*$):** **${r.min_total_cost:,.2f}/year**")
-            lines.append(f"- **Economic Net Savings:** **${r.cost_savings:,.2f}** / **{r.percentage_savings:.2f}%** annual procurement and inventory savings")
+            lines.append(f"- **Optimal Discount Tier:** **Tier {r.best_tier_index + 1}** at **\\${r.optimal_unit_price:.2f}/unit**")
+            lines.append(f"- **Minimized Total Annual Cost ($TC^*$):** **\\${r.min_total_cost:,.2f}/year**")
+            lines.append(f"- **Economic Net Savings:** **\\${r.cost_savings:,.2f}** / **{r.percentage_savings:.2f}%** annual procurement and inventory savings")
         elif model == ModelType.SAFETY_STOCK_ROP:
             r: ROPResult = result
             lines.append(f"- **Reorder Point (ROP):** Place replenishment order when inventory position drops to **{math.ceil(r.reorder_point):,} units** (Exact: `{r.reorder_point:.2f}` units)")
