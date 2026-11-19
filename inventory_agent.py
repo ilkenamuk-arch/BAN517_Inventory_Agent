@@ -237,15 +237,29 @@ class InventoryDecisionAgent:
         # cost of placing an order, ordering/setup cost, order expense, etc.
         # -------------------------------------------------------------------
         if model == ModelType.EOQ:
-            inputs["demand"] = extract_pattern([
-                rf"(?:annual|yearly|forecasted|expected)\s+demand\s*(?:is|=|:|of)?\s*({num_pat})",
-                rf"demand\s*(?:is|=|:|of|averages)?\s*({num_pat})\s*(?:units)?\s*(?:per\s+year|annually)",
-                rf"sells?\s*({num_pat})\s*units\s*(?:per\s+year|annually)",
-                rf"annual\s+(?:usage|requirement|sales)\s*(?:is|=|:|of)?\s*({num_pat})",
-                rf"({num_pat})\s*units\s*(?:per\s+year|annually|annual\s+demand)",
-                rf"annual\s+demand\s*(?:is|=|:)?\s*({num_pat})",
-                rf"demand\s*(?:of|is|=|:)\s*({num_pat})\s*units",
+            # Check for monthly demand first to perform accurate annual conversion
+            monthly_demand = extract_pattern([
+                rf"(?:monthly|month)\s+demand\s*(?:is|=|:|of)?\s*({num_pat})",
+                rf"demand\s*(?:is|=|:|of|averages)?\s*({num_pat})\s*(?:units)?\s*(?:per\s+month|monthly|a\s+month|each\s+month)",
+                rf"sells?\s*({num_pat})\s*units\s*(?:per\s+month|monthly|a\s+month|each\s+month)",
+                rf"({num_pat})\s*units\s*(?:per\s+month|monthly|a\s+month|each\s+month)",
             ], q)
+
+            if monthly_demand is not None:
+                inputs["monthly_demand"] = monthly_demand
+                inputs["demand"] = monthly_demand * 12.0
+                inputs["_demand_time_unit"] = "month"
+            else:
+                inputs["demand"] = extract_pattern([
+                    rf"(?:annual|yearly|forecasted|expected)\s+demand\s*(?:is|=|:|of)?\s*({num_pat})",
+                    rf"demand\s*(?:is|=|:|of|averages)?\s*({num_pat})\s*(?:units)?\s*(?:per\s+year|annually|a\s+year|each\s+year)",
+                    rf"sells?\s*({num_pat})\s*units\s*(?:per\s+year|annually|a\s+year|each\s+year)",
+                    rf"annual\s+(?:usage|requirement|sales)\s*(?:is|=|:|of)?\s*({num_pat})",
+                    rf"({num_pat})\s*units\s*(?:per\s+year|annually|annual\s+demand|a\s+year)",
+                    rf"annual\s+demand\s*(?:is|=|:)?\s*({num_pat})",
+                    rf"demand\s*(?:of|is|=|:)\s*({num_pat})\s*(?:units)?",
+                ], q)
+                inputs["_demand_time_unit"] = "year"
 
             inputs["order_cost"] = extract_pattern([
                 # Explicit required synonyms:
@@ -626,6 +640,7 @@ class InventoryDecisionAgent:
                 holding_rate=inputs.get("holding_rate"),
                 unit_cost=inputs.get("unit_cost"),
                 working_days_per_year=int(inputs.get("working_days_per_year", self.default_working_days)),
+                monthly_demand=inputs.get("monthly_demand"),
             )
             return tool_name, res
 
@@ -868,7 +883,15 @@ class InventoryDecisionAgent:
 
                 # Determine accurate parameter provenance
                 # 1. Calculated / Derived fields
-                if k in ["z_value", "safety_stock"] and model in [ModelType.FIXED_PERIOD_REVIEW, ModelType.SAFETY_STOCK_ROP]:
+                if k == "monthly_demand":
+                    status_note = "Given in problem statement"
+                elif k == "annual_demand_D":
+                    m_dem = inputs_dict.get("monthly_demand") or inputs.get("monthly_demand")
+                    if m_dem is not None:
+                        status_note = f"Calculated ({m_dem:,.0f} units/month × 12 months/year)"
+                    else:
+                        status_note = "Given in problem statement"
+                elif k in ["z_value", "safety_stock"] and model in [ModelType.FIXED_PERIOD_REVIEW, ModelType.SAFETY_STOCK_ROP]:
                     status_note = "Calculated"
                 elif k == "inventory_position" and model == ModelType.FIXED_PERIOD_REVIEW:
                     is_ip_direct = inputs.get("_inventory_position_explicit") or (inputs.get("inventory_position") is not None and inputs.get("on_hand_inventory") is None)

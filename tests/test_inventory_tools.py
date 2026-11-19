@@ -140,6 +140,18 @@ class TestCalculateEOQ(unittest.TestCase):
         self.assertIsNone(res.inputs_extracted.get("unit_cost_C"))
         self.assertTrue(any("not specified" in a.lower() for a in res.assumptions))
 
+    def test_eoq_with_monthly_demand(self):
+        """Verify calculate_eoq accurately converts monthly demand to annual demand."""
+        res = calculate_eoq(monthly_demand=1000.0, order_cost=25.0, holding_cost=0.50)
+        self.assertEqual(res.annual_demand, 12000.0)
+        self.assertEqual(res.monthly_demand, 1000.0)
+        self.assertAlmostEqual(res.eoq, 1095.45, places=2)
+        self.assertAlmostEqual(res.total_annual_inventory_cost, 547.72, places=2)
+        self.assertIn("monthly_demand", res.inputs_extracted)
+        self.assertEqual(res.inputs_extracted["monthly_demand"], 1000.0)
+        self.assertEqual(res.inputs_extracted["annual_demand_D"], 12000.0)
+        self.assertTrue(any("converted from monthly demand" in a for a in res.assumptions))
+
 
 # ===========================================================================
 # 2. calculate_quantity_discount() Tests
@@ -1076,6 +1088,30 @@ class TestStudentVerificationOutputs(unittest.TestCase):
         self.assertEqual(decision.calculation_result.best_tier_index, 1)
         self.assertAlmostEqual(decision.calculation_result.optimal_unit_price, 4.80, places=2)
         self.assertAlmostEqual(decision.calculation_result.min_total_cost, 24725.00, places=2)
+
+    def test_eoq_agent_with_monthly_demand_prompt(self):
+        """Verify agent converts monthly demand to annual demand and displays both in Section 1."""
+        q = "Find EOQ. Demand is 1,000 units per month, ordering cost is $25 per order, and holding cost is $0.50 per unit per year."
+        decision = self.agent.process_question(q)
+        self.assertTrue(decision.verification_passed)
+        self.assertEqual(decision.extracted_inputs.get("monthly_demand"), 1000.0)
+        self.assertEqual(decision.extracted_inputs.get("demand"), 12000.0)
+        self.assertAlmostEqual(decision.calculation_result.eoq, 1095.45, places=2)
+        self.assertAlmostEqual(decision.calculation_result.total_annual_inventory_cost, 547.72, places=2)
+        self.assertIn("| Monthly Demand (`monthly_demand`) | 1,000 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Annual Demand D (`annual_demand_D`) | 12,000 | Calculated (1,000 units/month × 12 months/year) |", decision.explanation)
+
+    def test_eoq_agent_with_annual_demand_prompt(self):
+        """Verify agent retains annual demand as 'Given in problem statement' when provided directly."""
+        q = "Find EOQ. Demand is 12,000 units per year, ordering cost is $25 per order, and holding cost is $0.50 per unit per year."
+        decision = self.agent.process_question(q)
+        self.assertTrue(decision.verification_passed)
+        self.assertIsNone(decision.extracted_inputs.get("monthly_demand"))
+        self.assertEqual(decision.extracted_inputs.get("demand"), 12000.0)
+        self.assertAlmostEqual(decision.calculation_result.eoq, 1095.45, places=2)
+        self.assertAlmostEqual(decision.calculation_result.total_annual_inventory_cost, 547.72, places=2)
+        self.assertIn("| Annual Demand D (`annual_demand_D`) | 12,000 | Given in problem statement |", decision.explanation)
+        self.assertNotIn("Monthly Demand (`monthly_demand`)", decision.explanation)
 
 
 # ===========================================================================

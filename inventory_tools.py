@@ -91,6 +91,7 @@ class EOQResult:
     # Assumptions & Verification
     assumptions: List[str]
     verification_passed: bool
+    monthly_demand: Optional[float] = None
     verification_notes: List[str] = field(default_factory=list)
 
     # 8 Student Verification Sections
@@ -123,16 +124,23 @@ def calculate_eoq(
     holding_rate: Optional[float] = None,
     unit_cost: Optional[float] = None,
     working_days_per_year: int = 365,
+    monthly_demand: Optional[float] = None,
 ) -> EOQResult:
     """
     Calculate Economic Order Quantity (EOQ) using the classical Wilson formula:
       Q = sqrt((2 * D * S) / H)
 
     Input Validation:
-    - demand (D) > 0 (required, never invented)
+    - demand (D) > 0 OR monthly_demand > 0 (required, never invented)
     - order_cost (S) > 0 (required, never invented)
     - holding_cost (H) > 0 OR (holding_rate (i) > 0 and unit_cost (C) > 0)
     """
+    # Convert monthly demand to annual demand if annual demand is not directly supplied
+    if demand is None and monthly_demand is not None:
+        if monthly_demand <= 0:
+            raise ValueError(f"Monthly demand must be strictly positive (got {monthly_demand}).")
+        demand = monthly_demand * 12.0
+
     # Strict input validation: never invent missing numerical inputs
     if demand is None:
         raise ValueError("Missing required numerical input: 'demand' (annual demand D).")
@@ -222,18 +230,24 @@ def calculate_eoq(
     }
 
     # 1. Inputs Extracted
-    inputs_extracted = {
-        "annual_demand_D": demand,
-        "order_cost_S": order_cost,
-        "holding_cost_H": computed_h,
-        "holding_rate_i": holding_rate,
-        "unit_cost_C": unit_cost,
-        "working_days_per_year": working_days_per_year,
-    }
+    inputs_extracted = {}
+    if monthly_demand is not None:
+        inputs_extracted["monthly_demand"] = monthly_demand
+    inputs_extracted["annual_demand_D"] = demand
+    inputs_extracted["order_cost_S"] = order_cost
+    inputs_extracted["holding_cost_H"] = computed_h
+    inputs_extracted["holding_rate_i"] = holding_rate
+    inputs_extracted["unit_cost_C"] = unit_cost
+    inputs_extracted["working_days_per_year"] = working_days_per_year
 
     # 2. Variable Definitions
-    variable_definitions = {
-        "D": "Annual demand rate (units/year)",
+    variable_definitions = {}
+    if monthly_demand is not None:
+        variable_definitions["monthly_demand"] = "Monthly demand rate specified in problem statement (units/month)"
+        variable_definitions["D"] = f"Annual demand rate = Monthly Demand * 12 = {demand:,.0f} units/year"
+    else:
+        variable_definitions["D"] = "Annual demand rate (units/year)"
+    variable_definitions.update({
         "S": "Fixed ordering / setup cost per replenishment order ($/order)",
         "H": "Holding / carrying cost per unit per year ($/unit/year)",
         "C": "Unit purchase price / procurement cost ($/unit)",
@@ -245,7 +259,7 @@ def calculate_eoq(
         "AHC": "Annual Holding Cost = (Q / 2) * H ($/year)",
         "TAC": "Total Annual Inventory Cost = AOC + AHC ($/year)",
         "TC": "Total Annual Cost including purchasing expenditure = TAC + (D * C) ($/year)",
-    }
+    })
 
     # 3. Formula
     formula = {
@@ -303,6 +317,8 @@ def calculate_eoq(
         "Inventory carrying cost (H) is linear and strictly proportional to average inventory level (Q/2).",
         "No shortages, backorders, or stockouts are permitted.",
     ]
+    if monthly_demand is not None:
+        assumptions.append(f"Annual demand rate (D = {demand:,.0f} units/year) is converted from monthly demand ({monthly_demand:,.0f} units/month * 12 months/year).")
     if unit_cost is not None and unit_cost > 0:
         assumptions.append(f"Purchase price per unit (C = ${unit_cost:,.2f}) is constant and independent of order quantity (no volume discounts).")
     else:
@@ -319,20 +335,25 @@ def calculate_eoq(
     ]
     verification_notes = list(verification_checks)
 
+    inputs_dict = {
+        "demand": demand,
+        "order_cost": order_cost,
+        "holding_cost": computed_h,
+        "holding_rate": holding_rate,
+        "unit_cost": unit_cost,
+        "working_days_per_year": working_days_per_year,
+    }
+    if monthly_demand is not None:
+        inputs_dict["monthly_demand"] = monthly_demand
+
     return EOQResult(
-        inputs={
-            "demand": demand,
-            "order_cost": order_cost,
-            "holding_cost": computed_h,
-            "holding_rate": holding_rate,
-            "unit_cost": unit_cost,
-            "working_days_per_year": working_days_per_year,
-        },
+        inputs=inputs_dict,
         annual_demand=demand,
         order_cost=order_cost,
         holding_cost=computed_h,
         unit_cost=unit_cost,
         working_days_per_year=working_days_per_year,
+        monthly_demand=monthly_demand,
         intermediate_calculations=intermediate,
         orders_per_year=orders_per_year,
         cycle_time_years=cycle_time_years,
