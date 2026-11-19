@@ -523,17 +523,18 @@ def calculate_quantity_discount(
         unconstrained_eoq = math.sqrt((2.0 * demand * order_cost) / tier_h)
 
         # Feasibility and candidate quantity determination:
-        # 1. If unconstrained EOQ < min_q, cost curve is strictly decreasing up to min_q -> candidate = min_q
+        # 1. If unconstrained EOQ < min_q, cost curve is strictly decreasing up to min_q -> candidate = min_q (breakpoint adjusted)
         # 2. If min_q <= unconstrained EOQ <= (max_q or inf) -> candidate = unconstrained EOQ (feasible)
-        # 3. If unconstrained EOQ > max_q -> candidate = max_q (or tier dominated by higher bracket)
-        is_feasible = True
+        # 3. If unconstrained EOQ > max_q -> candidate = max_q (or tier dominated by higher bracket, breakpoint adjusted)
         if unconstrained_eoq < min_q:
             candidate_q = min_q
+            is_feasible = False
         elif max_q is not None and unconstrained_eoq > max_q:
             candidate_q = max_q
             is_feasible = False
         else:
             candidate_q = unconstrained_eoq
+            is_feasible = True
 
         annual_purchase = demand * price
         annual_order = (demand / candidate_q) * order_cost

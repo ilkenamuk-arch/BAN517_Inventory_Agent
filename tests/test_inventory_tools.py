@@ -1531,6 +1531,19 @@ class TestSafetyStockROPMixedUnits(unittest.TestCase):
         self.assertEqual(best_tier.annual_holding_cost, 1100.0)
         self.assertEqual(best_tier.total_annual_cost, 56400.0)
 
+        # Tier candidate feasibility & labeling assertions
+        self.assertFalse(r.tiers[0].is_feasible)  # EOQ 500 > max 499 -> Breakpoint adjusted
+        self.assertTrue(r.tiers[1].is_feasible)   # 500 <= EOQ 510.75 <= 999 -> Feasible
+        self.assertFalse(r.tiers[2].is_feasible)  # EOQ 522.23 < min 1000 -> Breakpoint adjusted
+
+        # Section 4: Formula with substituted values feasibility labeling
+        self.assertIn("Candidate } Q = 510.75 \\text{ (feasible)}", decision.explanation)
+        self.assertIn("Candidate } Q = 1,000.00 \\text{ (breakpoint adjusted)}", decision.explanation)
+
+        # Section 5: Tier evaluation table feasibility labeling
+        self.assertIn("| Tier 2 | 500 to 999 | $11.50 | 510.8 | 510.8 | Feasible | $57,500.00 | $587.37 | $587.37 | **$58,674.73** |", decision.explanation)
+        self.assertIn("| Tier 3 **(OPTIMAL)** | 1,000 to Above | $11.00 | 522.2 | 1,000.0 | Breakpoint adjusted | $55,000.00 | $300.00 | $1,100.00 | **$56,400.00** |", decision.explanation)
+
         # Provenance verification in explanation
         self.assertIn("| Annual Demand D (`annual_demand_D`) | 5,000 | Given in problem statement |", decision.explanation)
         self.assertIn("| Order Cost S (`order_cost_S`) | $60.00 | Given in problem statement |", decision.explanation)
