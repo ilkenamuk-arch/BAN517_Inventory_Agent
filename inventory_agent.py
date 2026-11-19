@@ -80,6 +80,108 @@ class InventoryDecisionAgent:
     def __init__(self, default_working_days: int = 365):
         self.default_working_days = default_working_days
 
+    def extract_discount_tiers(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Robust multi-format parser for quantity discount schedules.
+        Supports:
+        - Price first: '$12 per unit for orders below 500 units, $11.50 for 500–999 units, and $11 for orders of 1,000 units or more'
+        - Range first / table: '0 to 499 units: $12.00; 500–999: $11.50; 1000+: $11.00'
+        - Conditional: 'If order is under 500, price is $12; if 500 to 999, $11.50; if 1000 or more, $11'
+        - JSON structured tiers embedded in queries
+        Normalizes Unicode dashes and en-dashes (\u2013, \u2014) to standard hyphens.
+        """
+        norm_text = text.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-').replace('\u00a0', ' ')
+        num_pat = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
+        tiers: List[Dict[str, Any]] = []
+
+        # Pattern A: Price first
+        # e.g. '$12 [per unit/each] for/at [orders of/below/under/between...] 500 [units] [or more/+]'
+        pat_price_first = (
+            rf'[\$]\s*({num_pat})\s*(?:per\s+unit|per\s+item|each|/unit)?\s*'
+            rf'(?:for|at)\s+(?:orders\s*(?:of)?\s*)?'
+            rf'(below|under|less\s+than|fewer\s+than|between|from|up\s+to|at\s+least|more\s+than|>|<|>=|<=)?\s*'
+            rf'({num_pat})\s*(?:to|-|and)?\s*({num_pat})?\s*(?:units?|items?|pieces?)?\s*(?:or\s+more|\+)?'
+        )
+        for m in re.finditer(pat_price_first, norm_text, re.IGNORECASE):
+            price_str, mod, b1, b2 = m.groups()
+            price = float(price_str.replace(',', ''))
+            mod = (mod or '').lower().strip()
+            val1 = float(b1.replace(',', '')) if b1 else None
+            val2 = float(b2.replace(',', '')) if b2 else None
+            clause = m.group(0).lower()
+            has_or_more = ('or more' in clause or '+' in clause or 'at least' in mod or 'more than' in mod or '>' in mod)
+
+            if any(w in mod for w in ['below', 'under', 'less', 'fewer', '<', 'up to']):
+                tiers.append({'min_qty': 0.0, 'max_qty': val1 - 1 if val1 else 0.0, 'unit_price': price})
+            elif val1 is not None and val2 is not None:
+                tiers.append({'min_qty': val1, 'max_qty': val2, 'unit_price': price})
+            elif has_or_more or (val1 is not None and not val2 and not mod):
+                tiers.append({'min_qty': val1 if val1 else 0.0, 'max_qty': None, 'unit_price': price})
+
+        if not tiers:
+            # Pattern B: Range first (table / colon / dash format)
+            # e.g. '0 to 499 units: $12' or '500-999: $11.50' or '1000+ units: $11' or 'under 500 units: $12'
+            pat_range_first = (
+                rf'(?:(?:order(?:s)?\s*(?:of)?\s*)?(under|below|less\s+than|fewer\s+than|<)\s*({num_pat})\s*(?:units?|items?)?|'
+                rf'({num_pat})\s*(?:to|-)\s*({num_pat})\s*(?:units?|items?)?|'
+                rf'({num_pat})\s*(?:\+|or\s+more)\s*(?:units?|items?)?)\s*'
+                rf'[:=\-]?\s*(?:costs?|is|at)?\s*[\$]\s*({num_pat})\s*(?:per\s+unit|each|/unit)?'
+            )
+            for m in re.finditer(pat_range_first, norm_text, re.IGNORECASE):
+                mod_under, val_under, low, high, plus_val, pr_str = m.groups()
+                price = float(pr_str.replace(',', ''))
+                if val_under:
+                    v = float(val_under.replace(',', ''))
+                    tiers.append({'min_qty': 0.0, 'max_qty': v - 1, 'unit_price': price})
+                elif low and high:
+                    tiers.append({'min_qty': float(low.replace(',', '')), 'max_qty': float(high.replace(',', '')), 'unit_price': price})
+                elif plus_val:
+                    tiers.append({'min_qty': float(plus_val.replace(',', '')), 'max_qty': None, 'unit_price': price})
+
+        if not tiers:
+            # Pattern C: Conditional 'if we order ... price is ...'
+            pat_conditional = (
+                rf'if\s+(?:we|you)?\s*(?:order(?:s)?\s*(?:is|are)?)?\s*'
+                rf'(below|under|less\s+than|fewer\s+than|<|between|from|at\s+least|more\s+than|>)?\s*'
+                rf'({num_pat})\s*(?:to|-|and)?\s*({num_pat})?\s*(?:units?|items?)?\s*(?:or\s+more|\+)?,\s*'
+                rf'(?:the\s+)?(?:cost|price)\s*(?:is|=|:)?\s*[\$]?\s*({num_pat})'
+            )
+            for m in re.finditer(pat_conditional, norm_text, re.IGNORECASE):
+                mod, b1, b2, pr_str = m.groups()
+                price = float(pr_str.replace(',', ''))
+                mod = (mod or '').lower().strip()
+                val1 = float(b1.replace(',', '')) if b1 else None
+                val2 = float(b2.replace(',', '')) if b2 else None
+                clause = m.group(0).lower()
+                has_or_more = ('or more' in clause or '+' in clause)
+
+                if any(w in mod for w in ['below', 'under', 'less', 'fewer', '<']):
+                    tiers.append({'min_qty': 0.0, 'max_qty': val1 - 1 if val1 else 0.0, 'unit_price': price})
+                elif val1 is not None and val2 is not None:
+                    tiers.append({'min_qty': val1, 'max_qty': val2, 'unit_price': price})
+                elif has_or_more or (val1 is not None and not val2):
+                    tiers.append({'min_qty': val1 if val1 else 0.0, 'max_qty': None, 'unit_price': price})
+
+        if not tiers:
+            import json
+            json_match = re.search(r'(\[\s*\{.*?\}\s*\])', norm_text, re.DOTALL)
+            if json_match:
+                try:
+                    raw_tiers = json.loads(json_match.group(1))
+                    for t in raw_tiers:
+                        if 'min_qty' in t and 'unit_price' in t:
+                            tiers.append({
+                                'min_qty': float(t['min_qty']),
+                                'max_qty': float(t['max_qty']) if t.get('max_qty') is not None else None,
+                                'unit_price': float(t['unit_price']),
+                            })
+                except Exception:
+                    pass
+
+        if tiers:
+            tiers.sort(key=lambda x: x['min_qty'])
+        return tiers
+
     # -----------------------------------------------------------------------
     # STAGE 1: Identify Model
     # -----------------------------------------------------------------------
@@ -140,12 +242,11 @@ class InventoryDecisionAgent:
                 scores[ModelType.QUANTITY_DISCOUNT] += wt
                 indicators[ModelType.QUANTITY_DISCOUNT].append(kw)
 
-        # Detect multiple price tiers or range pricing structure
-        tier_matches = re.findall(r"[\$]\s*\d+(?:\.\d+)?\s*for\s*(?:orders\s*)?(?:under|<|between|from|up\s+to|at\s+least|more\s+than|>)?\s*\d+", question, re.I)
-        range_matches = re.findall(r"\d+\s*(?:to|-)\s*\d+\s*(?:units)?\s*[:=\-]?\s*[\$]\s*\d+", question, re.I)
-        if len(tier_matches) >= 2 or len(range_matches) >= 2:
-            scores[ModelType.QUANTITY_DISCOUNT] += 15
-            indicators[ModelType.QUANTITY_DISCOUNT].append("multiple price tiers")
+        # Detect multiple price tiers or range pricing structure using shared robust parser
+        detected_tiers = self.extract_discount_tiers(question)
+        if len(detected_tiers) >= 2:
+            scores[ModelType.QUANTITY_DISCOUNT] += 25
+            indicators[ModelType.QUANTITY_DISCOUNT].append(f"multiple price tiers ({len(detected_tiers)} tiers detected)")
 
         # Model 3: Safety Stock and Reorder Point cues
         ss_rop_keywords = [
@@ -172,8 +273,10 @@ class InventoryDecisionAgent:
                 indicators[ModelType.EOQ].append(kw)
 
         # Disambiguation logic between overlapping cues
-        # If both EOQ and Quantity Discount matched, Quantity Discount has higher precedence if tiers/breaks exist
-        if scores[ModelType.QUANTITY_DISCOUNT] > 0 and ("discount" in q_lower or "tier" in q_lower or "break" in q_lower or "bracket" in q_lower):
+        # If multiple price tiers were detected, Quantity Discount strictly overrides EOQ
+        if len(detected_tiers) >= 2:
+            scores[ModelType.QUANTITY_DISCOUNT] = max(scores[ModelType.QUANTITY_DISCOUNT], scores[ModelType.EOQ] + 10)
+        elif scores[ModelType.QUANTITY_DISCOUNT] > 0 and ("discount" in q_lower or "tier" in q_lower or "break" in q_lower or "bracket" in q_lower):
             scores[ModelType.QUANTITY_DISCOUNT] += 5
 
         # If both Periodic Review and Safety Stock matched, Periodic Review wins if "review period" / "order-up-to" is present
@@ -205,10 +308,13 @@ class InventoryDecisionAgent:
 
         num_pat = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
 
-        def extract_pattern(patterns: List[str], text: str) -> Optional[float]:
+        def extract_pattern(patterns: List[str], text: str, reject_percent: bool = False) -> Optional[float]:
             for p in patterns:
-                m = re.search(p, text, re.IGNORECASE)
-                if m:
+                for m in re.finditer(p, text, re.IGNORECASE):
+                    if reject_percent:
+                        trailing = text[m.end(1):m.end(1) + 15].lstrip()
+                        if trailing.startswith(("%", "percent", "pct")):
+                            continue
                     val_str = m.group(1).replace(",", "").strip()
                     try:
                         return float(val_str)
@@ -270,19 +376,20 @@ class InventoryDecisionAgent:
                 rf"(?:costs?|incurs?)\s*[\$]?\s*({num_pat})\s*(?:per\s+order|to\s+place\s+an\s+order|for\s+setup|to\s+set\s+up)",
                 rf"placing\s+an\s+order\s+costs\s*[\$]?\s*({num_pat})",
                 rf"[\$]?\s*({num_pat})\s*(?:per\s+order|to\s+place\s+an\s+order)",
-            ], q)
+            ], q, reject_percent=True)
 
             inputs["holding_cost"] = extract_pattern([
                 rf"(?:holding\s+cost|carrying\s+cost|cost\s+to\s+hold|cost\s+of\s+holding|storage\s+cost|holding\s+expense|carrying\s+expense|cost\s+of\s+carrying)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit)?",
                 rf"[\$]?\s*({num_pat})\s*(?:per\s+unit\s+per\s+year|per\s+unit\s+annually|per\s+unit\s+to\s+hold)",
                 rf"[\$]?\s*({num_pat})\s*(?:holding\s+cost|carrying\s+cost)",
                 rf"cost\s+to\s+store\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
-            ], q)
+            ], q, reject_percent=True)
 
             inputs["holding_rate"] = extract_percent([
                 rf"(?:holding\s+cost\s+rate|holding\s+rate|carrying\s+cost\s+rate|carrying\s+rate|annual\s+carrying\s+charge|carrying\s+charge|cost\s+of\s+capital)\s*(?:is|=|:|of)?\s*({num_pat})%?",
                 rf"({num_pat})%\s*(?:holding|carrying)\s*(?:rate|cost|charge)?",
-                rf"holding\s+cost\s*(?:is|=|:|of)?\s*({num_pat})%\s*(?:of\s+(?:unit\s+)?(?:price|cost))?",
+                rf"(?:annual\s+)?holding\s+cost\s*(?:is|=|:|of)?\s*({num_pat})%\s*(?:of\s+(?:unit\s+)?(?:price|cost))?",
+                rf"holding\s+cost\s*(?:is|=|:|of)?\s*({num_pat})%",
             ], q)
 
             # Unit Purchase Price / Procurement Cost (Must NOT capture holding cost or order cost)
@@ -290,7 +397,7 @@ class InventoryDecisionAgent:
                 rf"(?:purchase\s+price|purchase\s+cost|unit\s+purchase\s+price|unit\s+purchase\s+cost|unit\s+cost|unit\s+price|wholesale\s+price|item\s+cost|item\s+price|procurement\s+cost|acquisition\s+cost)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
                 rf"(?<!holding\s)(?<!carrying\s)(?<!storage\s)(?<!setup\s)(?<!order\s)(?<!ordering\s)costs?\s*[\$]?\s*({num_pat})\s*(?:to\s+purchase|to\s+buy|wholesale|each|per\s+unit)",
                 rf"(?<!holding\s)(?<!carrying\s)price\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*(?:per\s+unit|each)?",
-            ], q)
+            ], q, reject_percent=True)
 
             extracted_days = extract_pattern([
                 rf"({num_pat})\s*(?:operating|working)?\s*days\s*per\s*year",
@@ -319,81 +426,32 @@ class InventoryDecisionAgent:
                 rf"[\$]?\s*({num_pat})\s*(?:ordering\s+cost|order\s+cost|setup\s+cost|setup\s+expense|cost\s+per\s+order|cost\s+of\s+placing\s+an\s+order)",
                 rf"(?:costs?|incurs?)\s*[\$]?\s*({num_pat})\s*(?:per\s+order|to\s+place\s+an\s+order)",
                 rf"[\$]?\s*({num_pat})\s*(?:per\s+order)",
-            ], q)
+            ], q, reject_percent=True)
 
             # Distinguish Fixed Holding Cost vs Percentage Holding Cost
+            # reject_percent=True prevents percentages (e.g. 20%) from being captured as fixed dollar holding cost
             inputs["fixed_holding_cost"] = extract_pattern([
                 rf"(?:fixed\s+holding\s+cost|fixed\s+carrying\s+cost)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
+                rf"holding\s+cost\s*(?:is|=|:|of)?\s*[\$]\s*({num_pat})\s*per\s*unit\s*(?:regardless\s+of\s+price|fixed)?",
+                rf"carrying\s+cost\s*(?:is|=|:|of)?\s*[\$]\s*({num_pat})\s*per\s*unit",
+                rf"[\$]\s*({num_pat})\s*(?:per\s+unit\s+per\s+year|per\s+unit\s+fixed\s+holding)",
                 rf"holding\s+cost\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*per\s*unit\s*(?:regardless\s+of\s+price|fixed)?",
                 rf"carrying\s+cost\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})\s*per\s*unit",
-                rf"[\$]\s*({num_pat})\s*(?:per\s+unit\s+per\s+year|per\s+unit\s+fixed\s+holding)",
-            ], q)
+            ], q, reject_percent=True)
 
             inputs["holding_rate"] = extract_percent([
                 rf"(?:holding\s+cost\s+rate|holding\s+rate|carrying\s+cost\s+rate|carrying\s+rate|annual\s+carrying\s+charge|carrying\s+charge)\s*(?:is|=|:|of)?\s*({num_pat})%?",
                 rf"({num_pat})%\s*(?:annual\s+)?(?:holding|carrying)\s*(?:rate|cost|charge)?",
-                rf"holding\s+cost\s*(?:is|=|:|of)?\s*({num_pat})%\s*(?:of\s+(?:unit\s+)?(?:price|cost))?",
+                rf"(?:annual\s+)?holding\s+cost\s*(?:is|=|:|of)?\s*({num_pat})%\s*(?:of\s+(?:unit\s+)?(?:price|cost))?",
+                rf"holding\s+cost\s*(?:is|=|:|of)?\s*({num_pat})%",
             ], q)
 
-            # Distinguish Quantity Breaks and Unit Prices
-            tiers = []
-            # Pattern A: "$P for orders under/between/at least Q"
-            tier_sentences = re.findall(
-                rf"[\$]\s*({num_pat})\s*for\s*(?:orders\s*)?(under|<|between|from|up\s+to|at\s+least|more\s+than|>)?\s*({num_pat})?\s*(?:to|-|and)?\s*({num_pat})?\s*(?:or\s+more|\+|units)?",
-                q,
-                re.IGNORECASE
-            )
-            if tier_sentences:
-                for price_str, modifier, b1, b2 in tier_sentences:
-                    price = float(price_str.replace(",", ""))
-                    mod = modifier.lower().strip() if modifier else ""
-                    val1 = float(b1.replace(",", "")) if b1 else None
-                    val2 = float(b2.replace(",", "")) if b2 else None
+            # If holding rate was provided and fixed holding cost was not explicitly specified as fixed, clear fixed_holding_cost
+            if inputs.get("holding_rate") is not None and not re.search(r"\bfixed\s+(?:holding|carrying)\s+cost\b", q, re.I):
+                inputs["fixed_holding_cost"] = None
 
-                    if "under" in mod or "up to" in mod or "<" in mod:
-                        tiers.append({"min_qty": 0, "max_qty": val1 - 1 if val1 else 999, "unit_price": price})
-                    elif "at least" in mod or "more" in mod or ">" in mod or (val1 and not val2):
-                        tiers.append({"min_qty": val1, "max_qty": None, "unit_price": price})
-                    elif val1 is not None and val2 is not None:
-                        tiers.append({"min_qty": val1, "max_qty": val2, "unit_price": price})
-                    elif val1 is not None:
-                        tiers.append({"min_qty": val1, "max_qty": None, "unit_price": price})
-
-            # Pattern B: "0 to 999 units: $5.00" or "1000 - 1999: $4.80" or "2000+: $4.75"
-            if not tiers:
-                range_matches = re.findall(
-                    rf"({num_pat})\s*(?:to|-)\s*({num_pat})\s*(?:units)?\s*[:=\-]?\s*[\$]\s*({num_pat})",
-                    q,
-                    re.IGNORECASE
-                )
-                for low, high, pr in range_matches:
-                    tiers.append({
-                        "min_qty": float(low.replace(",", "")),
-                        "max_qty": float(high.replace(",", "")),
-                        "unit_price": float(pr.replace(",", ""))
-                    })
-                plus_matches = re.findall(
-                    rf"({num_pat})\s*(?:\+|or\s+more)\s*(?:units)?\s*[:=\-]?\s*[\$]\s*({num_pat})",
-                    q,
-                    re.IGNORECASE
-                )
-                for low, pr in plus_matches:
-                    tiers.append({
-                        "min_qty": float(low.replace(",", "")),
-                        "max_qty": None,
-                        "unit_price": float(pr.replace(",", ""))
-                    })
-
-            # Pattern C: Fallback to structured JSON if provided in query
-            if not tiers:
-                json_match = re.search(r"(\[\s*\{.*?\}\s*\])", q, re.DOTALL)
-                if json_match:
-                    try:
-                        tiers = json.loads(json_match.group(1))
-                    except Exception:
-                        pass
-
-            inputs["discount_tiers"] = tiers
+            # Distinguish Quantity Breaks and Unit Prices using shared robust parser
+            inputs["discount_tiers"] = self.extract_discount_tiers(q)
 
         # -------------------------------------------------------------------
         # 3. Safety Stock and Reorder Point Extraction
@@ -501,7 +559,7 @@ class InventoryDecisionAgent:
 
             inputs["holding_cost_per_unit_year"] = extract_pattern([
                 rf"(?:holding\s+cost|carrying\s+cost)\s*(?:is|=|:|of)?\s*[\$]?\s*({num_pat})",
-            ], q)
+            ], q, reject_percent=True)
 
             inputs["order_quantity"] = extract_pattern([
                 rf"order\s+quantity\s*(?:is|=|:|of)?\s*({num_pat})",
@@ -1051,9 +1109,9 @@ class InventoryDecisionAgent:
                     desc = "Optional (only required when demand follows a Uniform distribution)"
                 elif k in ["holding_cost_H", "order_quantity_Q"] and model == ModelType.SAFETY_STOCK_ROP:
                     desc = "Optional (not required to determine safety stock or ROP)"
-                elif k == "fixed_holding_cost_H" and model == ModelType.QUANTITY_DISCOUNT:
+                elif k in ["fixed_holding_cost", "fixed_holding_cost_H"] and model == ModelType.QUANTITY_DISCOUNT:
                     desc = "Optional (holding rate i was specified instead)"
-                elif k == "holding_rate_i" and model == ModelType.QUANTITY_DISCOUNT:
+                elif k in ["holding_rate", "holding_rate_i"] and model == ModelType.QUANTITY_DISCOUNT:
                     desc = "Optional (fixed holding cost H was specified instead)"
                 elif k in ["on_hand_inventory", "on_order_inventory", "backorders", "inventory_position"] and model == ModelType.FIXED_PERIOD_REVIEW:
                     desc = "Optional (only required when determining current cycle order quantity Q)"

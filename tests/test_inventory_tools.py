@@ -1487,6 +1487,113 @@ class TestSafetyStockROPMixedUnits(unittest.TestCase):
         self.assertEqual(res.inputs_extracted["original_lead_time_L"], 3.0)
         self.assertEqual(res.inputs_extracted["days_per_week"], 7.0)
 
+    # -----------------------------------------------------------------------
+    # Instructor Test 8 & Robust Quantity Discount Regression Tests
+    # -----------------------------------------------------------------------
+    def test_quantity_discount_instructor_test_8_benchmark(self):
+        """
+        Exact Instructor Test 8 benchmark:
+        Prompt:
+        'Annual demand is 5,000 units. Ordering cost is $60 per order and annual holding cost is 20% of unit cost.
+        The supplier charges $12 per unit for orders below 500 units, $11.50 for 500–999 units,
+        and $11 for orders of 1,000 units or more. Find the best order quantity and annual cost.'
+
+        Expected Results:
+        - Model: Quantity Discount Model (not misclassified as EOQ)
+        - Tool: calculate_quantity_discount
+        - Holding rate: 0.20 (percentage holding cost, not dollar $20)
+        - Optimal order quantity: 1,000 units
+        - Unit price: $11.00
+        - Annual purchase cost: $55,000.00
+        - Annual ordering cost: $300.00
+        - Annual holding cost: $1,100.00
+        - Minimized total annual cost: $56,400.00
+        """
+        q = (
+            "Annual demand is 5,000 units. Ordering cost is $60 per order and annual holding cost is 20% of unit cost. "
+            "The supplier charges $12 per unit for orders below 500 units, $11.50 for 500\u2013999 units, "
+            "and $11 for orders of 1,000 units or more. Find the best order quantity and annual cost."
+        )
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.model_type, self.ModelType.QUANTITY_DISCOUNT)
+        self.assertEqual(decision.selected_tool, "calculate_quantity_discount")
+        self.assertTrue(decision.verification_passed)
+
+        r = decision.calculation_result
+        self.assertEqual(r.optimal_order_quantity, 1000.0)
+        self.assertEqual(r.optimal_unit_price, 11.0)
+        self.assertEqual(r.min_total_cost, 56400.0)
+        self.assertEqual(r.best_tier_index, 2)
+
+        best_tier = r.tiers[r.best_tier_index]
+        self.assertEqual(best_tier.annual_purchase_cost, 55000.0)
+        self.assertEqual(best_tier.annual_order_cost, 300.0)
+        self.assertEqual(best_tier.annual_holding_cost, 1100.0)
+        self.assertEqual(best_tier.total_annual_cost, 56400.0)
+
+        # Provenance verification in explanation
+        self.assertIn("| Annual Demand D (`annual_demand_D`) | 5,000 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Order Cost S (`order_cost_S`) | $60.00 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Holding Rate I (`holding_rate_i`) | 0.2 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Fixed Holding Cost H (`fixed_holding_cost_H`) | *Not provided* | Optional (holding rate i was specified instead) |", decision.explanation)
+        self.assertIn("| Discount Tiers Count (`discount_tiers_count`) | 3 | Given in problem statement |", decision.explanation)
+        self.assertIn("**Optimal Order Decision:** Order **1,000 units** at **\\$11.00/unit** (Tier 3).", decision.explanation)
+        self.assertIn("**Minimized Total Annual Cost:** **\\$56,400.00**", decision.explanation)
+
+    def test_quantity_discount_colon_table_unicode_dash(self):
+        """Verify colon table format with Unicode en-dashes correctly routes to QD and evaluates."""
+        q = (
+            "Annual demand is 10,000 units. Ordering cost is $100 per order, and holding cost rate is 10%. "
+            "Price schedule: 0 - 499 units: $12.00; 500\u2013999 units: $11.50; 1000+ units: $11.00. "
+            "What is optimal order quantity?"
+        )
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.model_type, self.ModelType.QUANTITY_DISCOUNT)
+        self.assertEqual(decision.selected_tool, "calculate_quantity_discount")
+        self.assertTrue(decision.verification_passed)
+        self.assertEqual(len(decision.calculation_result.tiers), 3)
+
+    def test_quantity_discount_conditional_phrasing(self):
+        """Verify conditional wording ('If order is under..., price is...') routes to QD."""
+        q = (
+            "Annual demand is 5,000 units. Setup cost is $60. Annual holding cost is 20% of unit cost. "
+            "If order is under 500 units, price is $12; if 500 to 999 units, price is $11.50; if 1000 or more, price is $11."
+        )
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.model_type, self.ModelType.QUANTITY_DISCOUNT)
+        self.assertEqual(decision.calculation_result.optimal_order_quantity, 1000.0)
+        self.assertEqual(decision.calculation_result.min_total_cost, 56400.0)
+
+    def test_quantity_discount_two_tier_break_without_keyword(self):
+        """Verify 2-tier volume break without the word 'discount' routes to QD."""
+        q = (
+            "Annual demand is 3,000 units, ordering cost is $50, and holding cost is $2 per unit per year. "
+            "The supplier charges $50 for orders below 200 units and $45 for orders of 200 or more. "
+            "Find optimal order quantity."
+        )
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.model_type, self.ModelType.QUANTITY_DISCOUNT)
+        self.assertEqual(len(decision.calculation_result.tiers), 2)
+
+    def test_percentage_rejection_safeguard(self):
+        """Verify percentage values are never extracted as fixed dollar holding costs."""
+        q = "Annual demand is 5,000 units. Ordering cost is $60 per order and annual holding cost is 20% of unit cost."
+        inputs_eoq = self.agent.extract_inputs(q, self.ModelType.EOQ)
+        self.assertIsNone(inputs_eoq["holding_cost"])
+        self.assertEqual(inputs_eoq["holding_rate"], 0.20)
+
+        inputs_qd = self.agent.extract_inputs(q, self.ModelType.QUANTITY_DISCOUNT)
+        self.assertIsNone(inputs_qd["fixed_holding_cost"])
+        self.assertEqual(inputs_qd["holding_rate"], 0.20)
+
+    def test_pure_eoq_not_misclassified_as_quantity_discount(self):
+        """Verify pure EOQ questions without price breaks continue to route to EOQ."""
+        q = "Annual demand is 1,000 units. Ordering cost is $25 per order, and holding cost is $0.50 per unit per year. Find EOQ."
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.model_type, self.ModelType.EOQ)
+        self.assertEqual(decision.selected_tool, "calculate_eoq")
+        self.assertAlmostEqual(decision.calculation_result.eoq, 316.23, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()
