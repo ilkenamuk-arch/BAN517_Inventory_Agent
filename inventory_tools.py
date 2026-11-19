@@ -743,6 +743,15 @@ class ROPResult:
     formula_with_substituted_values: Dict[str, str] = field(default_factory=dict)
     verification_checks: List[str] = field(default_factory=list)
 
+    # Mixed-unit / provenance metadata
+    original_lead_time_mean: Optional[float] = None
+    original_lead_time_sd: Optional[float] = None
+    original_lead_time_unit: Optional[str] = None
+    days_per_week: Optional[float] = None
+    days_per_week_explicit: bool = False
+    rounded_safety_stock: Optional[int] = None
+    rounded_reorder_point: Optional[int] = None
+
     def to_student_verification(self) -> Dict[str, Any]:
         return {
             "1_inputs_extracted": self.inputs_extracted,
@@ -779,6 +788,12 @@ def calculate_rop(
     demand_sd_per_period: Optional[float] = None,
     direct_ltd_mean: Optional[float] = None,
     direct_ltd_sd: Optional[float] = None,
+    # Mixed-unit & reconciliation parameters
+    original_lead_time_mean: Optional[float] = None,
+    original_lead_time_sd: Optional[float] = None,
+    original_lead_time_time_unit: Optional[str] = None,
+    days_per_week: Optional[float] = None,
+    days_per_week_explicit: bool = False,
 ) -> ROPResult:
     """
     Calculate Safety Stock (SS) and Reorder Point (ROP) under continuous review.
@@ -891,25 +906,32 @@ def calculate_rop(
         "annual_safety_stock_holding_cost": annual_ss_cost,
     }
 
+    rounded_ss = math.ceil(safety_stock)
+    rounded_rop = math.ceil(reorder_point)
     final_ans = {
         "reorder_point": reorder_point,
         "safety_stock": safety_stock,
+        "rounded_reorder_point": rounded_rop,
+        "rounded_safety_stock": rounded_ss,
         "case": case_name,
         "stockout_risk_per_cycle": stockout_risk,
     }
 
     # 1. Inputs Extracted
-    inputs_extracted = {
-        "demand_mean_d": d,
-        "lead_time_mean_L": L,
-        "demand_sd_sigma_d": sd_d,
-        "lead_time_sd_sigma_L": sd_L,
-        "service_level_CSL": csl,
-        "z_value": z,
-        "holding_cost_H": holding_cost_per_unit_year,
-        "order_quantity_Q": order_quantity,
-        "time_unit": time_unit,
-    }
+    inputs_extracted = {}
+    inputs_extracted["demand_mean_d"] = d
+    inputs_extracted["demand_sd_sigma_d"] = sd_d
+    if original_lead_time_mean is not None:
+        inputs_extracted["original_lead_time_L"] = original_lead_time_mean
+        inputs_extracted["original_lead_time_sd_sigma_L"] = original_lead_time_sd if original_lead_time_sd is not None else 0.0
+        inputs_extracted["days_per_week"] = days_per_week if days_per_week is not None else 7.0
+    inputs_extracted["lead_time_mean_L"] = L
+    inputs_extracted["lead_time_sd_sigma_L"] = sd_L
+    inputs_extracted["service_level_CSL"] = csl
+    inputs_extracted["z_value"] = z
+    inputs_extracted["holding_cost_H"] = holding_cost_per_unit_year
+    inputs_extracted["order_quantity_Q"] = order_quantity
+    inputs_extracted["time_unit"] = time_unit
 
     # 2. Variable Definitions
     time_unit_singular = time_unit[:-1] if time_unit.endswith('s') else time_unit
@@ -926,6 +948,13 @@ def calculate_rop(
         "ROP": "Reorder Point = mu_LT + SS (units)",
         "alpha": "Stockout risk per cycle = 1 - CSL",
     }
+    if original_lead_time_mean is not None:
+        orig_u = original_lead_time_time_unit or "weeks"
+        dpw = days_per_week if days_per_week is not None else 7.0
+        dpw_type = "Given in problem statement" if days_per_week_explicit else "Default assumption"
+        variable_definitions["original_L"] = f"Original lead time specified in problem ({original_lead_time_mean:,.2g} {orig_u})"
+        variable_definitions["original_sigma_L"] = f"Original lead time std dev specified in problem ({original_lead_time_sd if original_lead_time_sd is not None else 0.0:,.2g} {orig_u})"
+        variable_definitions["days_per_week"] = f"Conversion factor: {dpw:,.0f} operating days per week ({dpw_type})"
 
     # 3. Formula
     if sd_d == 0.0 and sd_L == 0.0:
@@ -976,6 +1005,13 @@ def calculate_rop(
         "Lead time demand is approximately normally distributed (supported by Central Limit Theorem).",
         "Stockouts occurring during lead time are fully backordered (Cycle Service Level).",
     ]
+    if original_lead_time_mean is not None:
+        orig_u = original_lead_time_time_unit or "weeks"
+        dpw = days_per_week if days_per_week is not None else 7.0
+        dpw_type = "specified in problem statement" if days_per_week_explicit else "standard calendar default assumption"
+        assumptions.append(
+            f"Replenishment lead time converted from {original_lead_time_mean:,.2g} {orig_u} to {L:,.1f} {time_unit} using {dpw:,.0f} days per week ({dpw_type})."
+        )
 
     # 7. Verification Checks
     verification_checks = [
@@ -1023,6 +1059,13 @@ def calculate_rop(
         formula=formula,
         formula_with_substituted_values=formula_with_substituted_values,
         verification_checks=verification_checks,
+        original_lead_time_mean=original_lead_time_mean,
+        original_lead_time_sd=original_lead_time_sd,
+        original_lead_time_unit=original_lead_time_time_unit,
+        days_per_week=days_per_week if days_per_week is not None else (7.0 if original_lead_time_mean is not None else None),
+        days_per_week_explicit=days_per_week_explicit,
+        rounded_safety_stock=rounded_ss,
+        rounded_reorder_point=rounded_rop,
     )
 
 

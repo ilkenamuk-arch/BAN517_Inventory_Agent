@@ -402,12 +402,16 @@ class InventoryDecisionAgent:
         # -------------------------------------------------------------------
         elif model == ModelType.SAFETY_STOCK_ROP:
             # 1. Lead-time standard deviation (extracted first to avoid substring collision)
-            inputs["lead_time_sd"] = extract_pattern([
+            extracted_lt_sd = extract_pattern([
+                # Coupled clause: "lead time is 3 weeks with a standard deviation of 0.5 weeks"
+                rf"lead\s*time\s*(?:is|averages|=|:|of)?\s*(?:constant\s+at\s+|about\s+|approximately\s+)?(?:{num_pat})\s*(?:days?|weeks?|months?)?\s*(?:with\s+a\s+|,\s*)?(?:standard\s+deviation|std\s*dev|sd|sigma)\s*(?:is|=|:|of)?\s*({num_pat})",
                 rf"(?:lead[\s-]time\s+standard\s+deviation|standard\s+deviation\s+of\s+lead[\s-]time|lead[\s-]time\s+std\s*dev|std\s*dev\s+of\s+lead[\s-]time|sigma_l)\s*(?:is|=|:|of)?\s*({num_pat})",
                 rf"lead\s+time\s+(?:has\s+a\s+)?(?:standard\s+deviation|std\s*dev|sd|sigma)\s*(?:is|=|:|of)?\s*({num_pat})",
                 rf"lead\s+time\s+varies\s+with\s+(?:a\s+)?(?:standard\s+deviation|std\s*dev)\s*(?:is|=|:|of)?\s*({num_pat})",
                 rf"(?:standard\s+deviation|std\s*dev|sd|sigma)\s*(?:is|=|:|of)?\s*({num_pat})\s*(?:days?|weeks?)?\s*(?:for\s+lead[\s-]time|in\s+lead[\s-]time)",
-            ], q) or 0.0
+            ], q)
+            inputs["lead_time_sd"] = extracted_lt_sd if extracted_lt_sd is not None else 0.0
+            inputs["_lead_time_sd_explicit"] = (extracted_lt_sd is not None)
 
             # 2. Average lead time
             inputs["lead_time"] = extract_pattern([
@@ -417,9 +421,34 @@ class InventoryDecisionAgent:
                 rf"({num_pat})[\s-]week\s+(?:replenishment\s+)?lead\s+time",
             ], q)
 
+            # Detect lead time time unit
+            lt_unit_m = re.search(
+                rf"(?:lead\s*time|delivery\s*time|replenishment\s*time)\s*(?:is|averages|=|:|of)?\s*(?:constant\s+at\s+|about\s+|approximately\s+)?(?:{num_pat})\s*(days?|weeks?|months?)",
+                q,
+                re.IGNORECASE
+            )
+            if lt_unit_m and lt_unit_m.group(1):
+                u = lt_unit_m.group(1).lower()
+                inputs["lead_time_time_unit"] = "weeks" if "week" in u else ("months" if "month" in u else "days")
+            elif re.search(rf"({num_pat})[\s-]week\s+(?:replenishment\s+)?lead\s+time", q, re.IGNORECASE):
+                inputs["lead_time_time_unit"] = "weeks"
+            elif re.search(rf"({num_pat})[\s-]day\s+(?:replenishment\s+)?lead\s+time", q, re.IGNORECASE):
+                inputs["lead_time_time_unit"] = "days"
+            elif "week" in q.lower() and ("lead time" in q.lower() or "replenishment" in q.lower()):
+                lt_pos = q.lower().find("lead time")
+                w_pos = q.lower().find("week")
+                d_pos = q.lower().find("day")
+                if lt_pos != -1 and w_pos != -1 and abs(lt_pos - w_pos) < (abs(lt_pos - d_pos) if d_pos != -1 else 999):
+                    inputs["lead_time_time_unit"] = "weeks"
+                else:
+                    inputs["lead_time_time_unit"] = "days"
+            else:
+                inputs["lead_time_time_unit"] = "days"
+
             # 3. Demand standard deviation (extracted first to avoid substring collision)
             inputs["demand_sd_per_period"] = extract_pattern([
-                rf"(?:demand\s+standard\s+deviation|standard\s+deviation\s+of\s+demand|demand\s+std\s*dev|std\s*dev\s+of\s+demand|sigma_d)\s*(?:is|=|:|of)?\s*({num_pat})",
+                rf"demand\s*(?:is|averages|=|:|of)?\s*(?:constant\s+at\s+|about\s+|approximately\s+)?(?:{num_pat})\s*(?:units)?\s*(?:per\s+(?:day|week|month|year)|daily|weekly)?\s*(?:with\s+a\s+|,\s*)?(?:standard\s+deviation|std\s*dev|sd|sigma)\s*(?:is|=|:|of)?\s*({num_pat})\s*(?:units)?",
+                rf"(?:demand\s+standard\s+deviation|standard\s+deviation\s+of\s+demand|demand\s+std\s*dev|std\s*dev\s+of\s+demand|sigma_d)\s*(?:is|=|:|of)?\s*({num_pat})\s*(?:units)?",
                 rf"(?:daily|weekly|period)\s+demand\s+(?:has\s+a\s+)?(?:standard\s+deviation|std\s*dev|sd|sigma)\s*(?:is|=|:|of)?\s*({num_pat})",
                 rf"with\s+(?:a\s+)?(?:standard\s+deviation|std\s*dev)\s+(?:of\s+)?({num_pat})\s*units",
                 rf"(?:standard\s+deviation|std\s*dev|sd|sigma)\s*(?:is|=|:|of)?\s*({num_pat})\s*(?:units)?\s*(?:for\s+(?:daily\s+|weekly\s+)?demand|in\s+demand)",
@@ -432,6 +461,29 @@ class InventoryDecisionAgent:
                 rf"({num_pat})\s*units\s*(?:per\s+day|per\s+week|daily|weekly)\s*(?:average\s+|constant\s+)?demand",
                 rf"mean\s+demand\s*(?:is|=|:)?\s*({num_pat})",
             ], q)
+
+            # Detect demand time unit
+            d_unit_m = re.search(
+                rf"demand\b[^\.\;]*?\b(?:per\s+(day|week|month)|(daily|weekly|monthly))",
+                q,
+                re.IGNORECASE
+            )
+            if d_unit_m:
+                matched_str = (d_unit_m.group(1) or d_unit_m.group(2)).lower()
+                if "week" in matched_str:
+                    inputs["demand_time_unit"] = "weeks"
+                elif "month" in matched_str:
+                    inputs["demand_time_unit"] = "months"
+                else:
+                    inputs["demand_time_unit"] = "days"
+            elif re.search(r"\b(?:daily|per\s+day)\b", q, re.IGNORECASE):
+                inputs["demand_time_unit"] = "days"
+            elif re.search(r"\b(?:weekly|per\s+week)\b", q, re.IGNORECASE):
+                inputs["demand_time_unit"] = "weeks"
+            elif re.search(r"\b(?:monthly|per\s+month)\b", q, re.IGNORECASE):
+                inputs["demand_time_unit"] = "months"
+            else:
+                inputs["demand_time_unit"] = "days"
 
             # 5. Service level or z-value
             inputs["service_level"] = extract_percent([
@@ -456,12 +508,47 @@ class InventoryDecisionAgent:
                 rf"q\s*(?:is|=|:)?\s*({num_pat})\s*units",
             ], q)
 
-            if "week" in q.lower():
-                inputs["time_unit"] = "weeks"
-            elif "month" in q.lower():
-                inputs["time_unit"] = "months"
+            # 6. Days per week (Assumption vs Explicit)
+            extracted_dpw = extract_pattern([
+                rf"({num_pat})\s*(?:operating|working)?\s*days\s*(?:per|a|in\s+a)\s*week",
+                rf"assuming\s*({num_pat})\s*days\s*(?:per|a)\s*week",
+                rf"(?:operating|working)\s*(?:for|=|:)?\s*({num_pat})\s*days\s*(?:per|a)\s*week",
+            ], q)
+            if extracted_dpw is not None:
+                inputs["days_per_week"] = extracted_dpw
+                inputs["_days_per_week_explicit"] = True
             else:
+                inputs["days_per_week"] = 7.0
+                inputs["_days_per_week_explicit"] = False
+
+            # 7. Time Unit Reconciliation
+            d_u = inputs["demand_time_unit"]
+            lt_u = inputs["lead_time_time_unit"]
+            dpw = inputs["days_per_week"]
+            lt_val = inputs.get("lead_time")
+            lt_sd_val = inputs.get("lead_time_sd", 0.0)
+
+            if d_u == "days" and lt_u == "weeks" and lt_val is not None:
+                inputs["original_lead_time"] = lt_val
+                inputs["original_lead_time_sd"] = lt_sd_val
+                inputs["original_lead_time_unit"] = "weeks"
+                inputs["reconciled_lead_time"] = lt_val * dpw
+                inputs["reconciled_lead_time_sd"] = lt_sd_val * dpw
                 inputs["time_unit"] = "days"
+                inputs["_time_unit_reconciled"] = True
+            elif d_u == "weeks" and lt_u == "days" and lt_val is not None:
+                inputs["original_lead_time"] = lt_val
+                inputs["original_lead_time_sd"] = lt_sd_val
+                inputs["original_lead_time_unit"] = "days"
+                inputs["reconciled_lead_time"] = lt_val / dpw
+                inputs["reconciled_lead_time_sd"] = lt_sd_val / dpw
+                inputs["time_unit"] = "weeks"
+                inputs["_time_unit_reconciled"] = True
+            else:
+                inputs["time_unit"] = d_u
+                inputs["reconciled_lead_time"] = lt_val
+                inputs["reconciled_lead_time_sd"] = lt_sd_val
+                inputs["_time_unit_reconciled"] = False
 
         # -------------------------------------------------------------------
         # 4. Fixed-Period Review Model Extraction
@@ -659,14 +746,19 @@ class InventoryDecisionAgent:
             tool_name = "calculate_rop"
             res = calculate_rop(
                 demand_mean=inputs.get("demand_mean_per_period"),
-                lead_time_mean=inputs["lead_time"],
+                lead_time_mean=inputs.get("reconciled_lead_time", inputs.get("lead_time")),
                 demand_sd=inputs.get("demand_sd_per_period", 0.0),
-                lead_time_sd=inputs.get("lead_time_sd", 0.0),
+                lead_time_sd=inputs.get("reconciled_lead_time_sd", inputs.get("lead_time_sd", 0.0)),
                 service_level=inputs.get("service_level"),
                 z_value=inputs.get("z_value"),
                 holding_cost_per_unit_year=inputs.get("holding_cost_per_unit_year"),
                 order_quantity=inputs.get("order_quantity"),
                 time_unit=inputs.get("time_unit", "days"),
+                original_lead_time_mean=inputs.get("original_lead_time"),
+                original_lead_time_sd=inputs.get("original_lead_time_sd"),
+                original_lead_time_time_unit=inputs.get("original_lead_time_unit"),
+                days_per_week=inputs.get("days_per_week"),
+                days_per_week_explicit=inputs.get("_days_per_week_explicit", False),
             )
             return tool_name, res
 
@@ -874,7 +966,7 @@ class InventoryDecisionAgent:
         for k, v in inputs_dict.items():
             if k.startswith("_"):
                 continue
-            clean_k = k.replace("_", " ").title()
+            clean_k = "Operating Days Per Week" if k == "days_per_week" else k.replace("_", " ").title()
             if v is not None:
                 if isinstance(v, float):
                     v_str = f"${v:,.2f}" if any(c in k.lower() for c in ["cost", "price", "salvage", "penalty"]) else (f"{v:,.4f}".rstrip("0").rstrip(".") if "." in f"{v:,.4f}" else f"{v:,.0f}")
@@ -891,8 +983,25 @@ class InventoryDecisionAgent:
                         status_note = f"Calculated ({m_dem:,.0f} units/month × 12 months/year)"
                     else:
                         status_note = "Given in problem statement"
+                elif k in ["original_lead_time_L", "original_lead_time_sd_sigma_L"]:
+                    status_note = "Given in problem statement"
+                elif k == "days_per_week" and model == ModelType.SAFETY_STOCK_ROP:
+                    is_dpw_explicit = inputs.get("_days_per_week_explicit", False) or getattr(result, "days_per_week_explicit", False)
+                    status_note = "Given in problem statement" if is_dpw_explicit else "Default assumption (7 days/week calendar)"
+                elif k == "lead_time_mean_L" and model == ModelType.SAFETY_STOCK_ROP and inputs_dict.get("original_lead_time_L") is not None:
+                    orig_l = inputs_dict.get("original_lead_time_L")
+                    orig_u = getattr(result, "original_lead_time_unit", "weeks") or "weeks"
+                    dpw = inputs_dict.get("days_per_week", 7.0)
+                    status_note = f"Calculated ({orig_l:,.2g} {orig_u} × {dpw:,.0f} days/week)"
+                elif k == "lead_time_sd_sigma_L" and model == ModelType.SAFETY_STOCK_ROP and inputs_dict.get("original_lead_time_L") is not None:
+                    orig_sd = inputs_dict.get("original_lead_time_sd_sigma_L", 0.0)
+                    orig_u = getattr(result, "original_lead_time_unit", "weeks") or "weeks"
+                    dpw = inputs_dict.get("days_per_week", 7.0)
+                    status_note = f"Calculated ({orig_sd:,.2g} {orig_u} × {dpw:,.0f} days/week)"
                 elif k in ["z_value", "safety_stock"] and model in [ModelType.FIXED_PERIOD_REVIEW, ModelType.SAFETY_STOCK_ROP]:
                     status_note = "Calculated"
+                elif k == "time_unit" and model == ModelType.SAFETY_STOCK_ROP and inputs_dict.get("original_lead_time_L") is not None:
+                    status_note = "Calculated (Reconciled to daily basis)"
                 elif k == "inventory_position" and model == ModelType.FIXED_PERIOD_REVIEW:
                     is_ip_direct = inputs.get("_inventory_position_explicit") or (inputs.get("inventory_position") is not None and inputs.get("on_hand_inventory") is None)
                     status_note = "Given in problem statement" if is_ip_direct else "Calculated"
@@ -925,7 +1034,7 @@ class InventoryDecisionAgent:
                         is_salvage_explicit = bool(re.search(r'\b(?:salvage|clearance|scrap|markdown|liquidat)\b', question, re.IGNORECASE))
                     status_note = "Given in problem statement" if is_salvage_explicit else "Default assumption"
                 elif k == "lead_time_sd_sigma_L" and model == ModelType.SAFETY_STOCK_ROP and v == 0.0:
-                    has_lt_sd = bool(re.search(r'\b(?:lead\s+time\s+standard\s+deviation|lead\s+time\s+sd|lead\s+time\s+sigma)\b', question, re.IGNORECASE))
+                    has_lt_sd = inputs.get("_lead_time_sd_explicit", False) or bool(re.search(r'\b(?:lead\s+time\s+standard\s+deviation|lead\s+time\s+sd|lead\s+time\s+sigma)\b', question, re.IGNORECASE))
                     status_note = "Given in problem statement" if has_lt_sd else "Default assumption (constant lead time)"
                 elif k == "distribution_type" and model == ModelType.NEWSVENDOR:
                     has_dist = bool(re.search(r'\b(?:uniform|normal)\b', question, re.IGNORECASE))
@@ -1186,6 +1295,15 @@ class InventoryDecisionAgent:
             lines.append(f"- The safety stock buffer of **{math.ceil(r.safety_stock):,} units** absorbs variability during the `{r.lead_time}` {r.time_unit} lead time window.")
             if r.service_level is not None:
                 lines.append(f"- Achieving a {r.service_level*100:.1f}% service level requires balancing stockout risk ({r.stockout_risk_per_cycle*100:.1f}% per cycle) against holding cost.")
+            if r.original_lead_time_mean is not None and r.days_per_week is not None:
+                sens_dpw = 5.0 if r.days_per_week == 7.0 else 7.0
+                sens_L = r.original_lead_time_mean * sens_dpw
+                sens_sd_L = (r.original_lead_time_sd or 0.0) * sens_dpw
+                sens_mu = r.demand_mean * sens_L
+                sens_sd = math.sqrt(sens_L * (r.demand_sd ** 2) + (r.demand_mean ** 2) * (sens_sd_L ** 2))
+                sens_ss = (r.z_factor or 0.0) * sens_sd
+                sens_rop = sens_mu + sens_ss
+                lines.append(f"- Operating Days Sensitivity: Under a {sens_dpw:.0f}-day week ($L = {sens_L:.0f}$ days, $\\sigma_L = {sens_sd_L:.1f}$ days): $\\mu_{{LT}} = {sens_mu:,.2f}$ units, $\\sigma_{{LT}} = {sens_sd:.2f}$ units, Safety Stock = **{math.ceil(sens_ss):,} units** (`{sens_ss:.2f}` units), Reorder Point = **{math.ceil(sens_rop):,} units** (`{sens_rop:.2f}` units).")
         elif model == ModelType.FIXED_PERIOD_REVIEW:
             r: PeriodicReviewResult = result
             lines.append(f"- Periodic review requires protecting against demand over **{r.protection_period} {r.time_unit}** ($R + L$), requiring +{r.ss_increase_percentage:.1f}% more safety stock than continuous review.")

@@ -1368,5 +1368,125 @@ class TestMulticriteriaInventoryClassification(unittest.TestCase):
         self.assertEqual(sum(res.class_counts.values()), 3)
 
 
+# ===========================================================================
+# 11. Safety Stock & ROP Mixed Time-Unit Tests
+# ===========================================================================
+class TestSafetyStockROPMixedUnits(unittest.TestCase):
+    """Regression tests for Safety Stock & ROP with mixed time units (daily demand & weekly lead time)."""
+
+    def setUp(self):
+        from inventory_agent import InventoryDecisionAgent, ModelType
+        self.agent = InventoryDecisionAgent()
+        self.ModelType = ModelType
+
+    def test_benchmark_daily_demand_weekly_lead_time_default_7_days(self):
+        """
+        Verify benchmark question:
+        d = 40 units/day, sd_d = 8 units/day
+        L = 3 weeks, sd_L = 0.5 weeks
+        CSL = 95% (z = 1.64485)
+        Default 7 days/week -> L = 21 days, sd_L = 3.5 days
+        mu_LT = 40 * 21 = 840 units
+        sigma_LT = sqrt(21 * 8^2 + 40^2 * 3.5^2) = sqrt(1344 + 19600) = sqrt(20944) ~ 144.7204 units
+        SS = 1.64485 * 144.7204 ~ 238.0439 units -> rounded upward: 239 units
+        ROP = 840 + 238.0439 = 1078.0439 units -> rounded upward: 1079 units
+        """
+        q = (
+            "A product has average demand of 40 units per day with a standard deviation of 8 units per day. "
+            "Average lead time is 3 weeks with a standard deviation of 0.5 weeks. "
+            "Determine the safety stock and reorder point for a 95% service level."
+        )
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.model_type, self.ModelType.SAFETY_STOCK_ROP)
+        self.assertEqual(decision.selected_tool, "calculate_rop")
+        self.assertTrue(decision.verification_passed)
+
+        r = decision.calculation_result
+        self.assertEqual(r.case_identified, "variable demand and variable lead time")
+        self.assertAlmostEqual(r.expected_lead_time_demand, 840.0, places=2)
+        expected_sigma = math.sqrt(21.0 * (8.0 ** 2) + (40.0 ** 2) * (3.5 ** 2))
+        self.assertAlmostEqual(r.stdev_lead_time_demand, expected_sigma, places=2)
+        self.assertAlmostEqual(r.safety_stock, 238.04, places=1)
+        self.assertAlmostEqual(r.reorder_point, 1078.04, places=1)
+        self.assertEqual(r.rounded_safety_stock, 239)
+        self.assertEqual(r.rounded_reorder_point, 1079)
+
+        # Provenance verification in explanation
+        self.assertIn("| Demand Mean D (`demand_mean_d`) | 40 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Demand Sd Sigma D (`demand_sd_sigma_d`) | 8 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Original Lead Time L (`original_lead_time_L`) | 3 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Original Lead Time Sd Sigma L (`original_lead_time_sd_sigma_L`) | 0.5 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Operating Days Per Week (`days_per_week`) | 7 | Default assumption (7 days/week calendar) |", decision.explanation)
+        self.assertIn("| Lead Time Mean L (`lead_time_mean_L`) | 21 | Calculated (3 weeks × 7 days/week) |", decision.explanation)
+        self.assertIn("| Lead Time Sd Sigma L (`lead_time_sd_sigma_L`) | 3.5 | Calculated (0.5 weeks × 7 days/week) |", decision.explanation)
+        self.assertIn("| Time Unit (`time_unit`) | days | Calculated (Reconciled to daily basis) |", decision.explanation)
+
+        # Headline verification
+        self.assertIn("When inventory drops to **1,079 units**, place a replenishment order.", decision.explanation)
+        self.assertIn("- **Safety Stock Buffer:** **239 units** (Exact: `238.04` units)", decision.explanation)
+        self.assertIn("- **Reorder Point (ROP):** **1078.04 units** (or **1,079 units** integer threshold)", decision.explanation)
+
+        # Assumptions & sensitivity
+        self.assertIn("using 7 days per week (standard calendar default assumption)", decision.explanation)
+        self.assertIn("Operating Days Sensitivity: Under a 5-day week", decision.explanation)
+
+    def test_benchmark_daily_demand_weekly_lead_time_explicit_5_days(self):
+        """
+        Verify benchmark question with explicit 5 days per week:
+        d = 40 units/day, sd_d = 8 units/day
+        L = 3 weeks, sd_L = 0.5 weeks
+        Operating days = 5 days/week -> L = 15 days, sd_L = 2.5 days
+        mu_LT = 40 * 15 = 600 units
+        sigma_LT = sqrt(15 * 8^2 + 40^2 * 2.5^2) = sqrt(960 + 10000) = sqrt(10960) ~ 104.6900 units
+        SS = 1.64485 * 104.6900 ~ 172.1998 units -> rounded upward: 173 units
+        ROP = 600 + 172.1998 = 772.1998 units -> rounded upward: 773 units
+        """
+        q = (
+            "A product has average demand of 40 units per day with a standard deviation of 8 units per day. "
+            "Average lead time is 3 weeks with a standard deviation of 0.5 weeks. "
+            "Assuming 5 operating days per week. Determine the safety stock and reorder point for a 95% service level."
+        )
+        decision = self.agent.process_question(q)
+        self.assertEqual(decision.model_type, self.ModelType.SAFETY_STOCK_ROP)
+        self.assertTrue(decision.verification_passed)
+
+        r = decision.calculation_result
+        self.assertEqual(r.case_identified, "variable demand and variable lead time")
+        self.assertAlmostEqual(r.expected_lead_time_demand, 600.0, places=2)
+        expected_sigma = math.sqrt(15.0 * (8.0 ** 2) + (40.0 ** 2) * (2.5 ** 2))
+        self.assertAlmostEqual(r.stdev_lead_time_demand, expected_sigma, places=2)
+        self.assertAlmostEqual(r.safety_stock, 172.20, places=1)
+        self.assertAlmostEqual(r.reorder_point, 772.20, places=1)
+        self.assertEqual(r.rounded_safety_stock, 173)
+        self.assertEqual(r.rounded_reorder_point, 773)
+
+        self.assertIn("| Operating Days Per Week (`days_per_week`) | 5 | Given in problem statement |", decision.explanation)
+        self.assertIn("| Lead Time Mean L (`lead_time_mean_L`) | 15 | Calculated (3 weeks × 5 days/week) |", decision.explanation)
+        self.assertIn("| Lead Time Sd Sigma L (`lead_time_sd_sigma_L`) | 2.5 | Calculated (0.5 weeks × 5 days/week) |", decision.explanation)
+        self.assertIn("When inventory drops to **773 units**, place a replenishment order.", decision.explanation)
+        self.assertIn("- **Safety Stock Buffer:** **173 units** (Exact: `172.20` units)", decision.explanation)
+
+    def test_calculate_rop_direct_mixed_units_dataclass(self):
+        """Verify calculate_rop handles mixed-unit parameters directly."""
+        res = calculate_rop(
+            demand_mean=40.0,
+            lead_time_mean=21.0,
+            demand_sd=8.0,
+            lead_time_sd=3.5,
+            service_level=0.95,
+            original_lead_time_mean=3.0,
+            original_lead_time_sd=0.5,
+            original_lead_time_time_unit="weeks",
+            days_per_week=7.0,
+            days_per_week_explicit=False,
+        )
+        self.assertEqual(res.case_identified, "variable demand and variable lead time")
+        self.assertEqual(res.rounded_safety_stock, 239)
+        self.assertEqual(res.rounded_reorder_point, 1079)
+        self.assertIn("original_lead_time_L", res.inputs_extracted)
+        self.assertEqual(res.inputs_extracted["original_lead_time_L"], 3.0)
+        self.assertEqual(res.inputs_extracted["days_per_week"], 7.0)
+
+
 if __name__ == "__main__":
     unittest.main()
